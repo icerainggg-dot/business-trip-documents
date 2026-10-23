@@ -1,0 +1,11 @@
+# Windows 실행 파일은 ZIP으로 내려받아도 CRLF 유지 (LF면 cmd가 한글 줄을 잘못 읽을 수 있음)
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+
+# 바이너리
+*.wasm  binary
+*.gz    binary
+*.bcmap binary
+*.pfb   binary
+*.ttf   binary
+*.png   binary

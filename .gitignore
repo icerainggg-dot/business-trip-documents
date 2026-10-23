@@ -1,0 +1,14 @@
+# 개인정보가 들어 있는 테스트 서류 (탑승권·영수증 캡처 등) — 절대 올리지 않음
+새 폴더/
+sample/
+shot*.png
+
+# 만들어진 증빙서류
+출장증빙서류*.hwpx
+출장증빙서류*.pdf
+*.zip
+
+__pycache__/
+.vscode/
+Thumbs.db
+desktop.ini

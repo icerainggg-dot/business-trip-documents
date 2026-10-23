@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>출장비 증빙서류 취합</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='2' y='1' width='12' height='14' rx='2' fill='%231f5fbf'/%3E%3Cpath d='M5 5h6M5 8h6M5 11h4' stroke='white' stroke-width='1.4'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+  <header class="top">
+    <div class="wrap">
+      <h1>출장비 증빙서류 취합</h1>
+      <p class="sub">영수증·확인서·지도 캡처·공문을 한꺼번에 올리면 자동으로 분류하고, 빠진 서류와 불일치 항목을 알려줍니다. 파일은 이 PC의 브라우저 안에서만 처리되며 서버로 전송되지 않습니다.</p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- 1. 특이사항 -->
+    <section class="card">
+      <h2><span class="step">1</span>특이사항 <small>선택 입력 · 적은 내용이 증빙서류의 출발/도착 칸에 그대로 들어갑니다</small></h2>
+      <form id="trip" class="remarks" autocomplete="off">
+        <label>출발 특이사항<textarea name="remarkOut" rows="2" placeholder="예: 교육 시작이 09시라 전날 출발"></textarea></label>
+        <label>도착 특이사항<textarea name="remarkBack" rows="2" placeholder="예: 업무 지연으로 다음 날 복귀"></textarea></label>
+      </form>
+    </section>
+
+    <!-- 2. 파일 등록 -->
+    <section class="card">
+      <h2><span class="step">2</span>서류 등록</h2>
+      <p id="file-warn" class="file-warn" hidden><b>index.html을 직접 열면 이미지·스캔 PDF를 읽을 수 없습니다.</b> 이 창을 닫고 같은 폴더의 <b>start.bat</b>을 실행해 열린 주소(http://localhost:8080/)에서 사용하세요.</p>
+      <label id="drop" class="drop" tabindex="0">
+        <input id="file" type="file" multiple accept=".jpg,.jpeg,.png,.gif,.bmp,.webp,.pdf,.hwpx,.hwp,image/*,application/pdf">
+        <strong>파일을 여기로 끌어다 놓거나 클릭해서 선택</strong>
+        <span>교통 영수증 · 탑승확인서 · 숙박 영수증/확인서 · 지도앱 거리 캡처 · 유가 캡처 · 공문/일정안내 (jpg, png, pdf, hwpx)</span>
+      </label>
+      <div id="progress" class="progress" hidden><div class="bar"><i></i></div><span></span></div>
+      <p id="dup-note" class="dup-note" hidden></p>
+    </section>
+
+    <!-- 3. 결과 -->
+    <section id="result" class="card" hidden>
+      <div class="result-head">
+        <h2><span class="step">3</span>점검 결과</h2>
+        <div class="actions">
+          <button id="btn-hwpx" class="primary" type="button">증빙서류 HWPX</button>
+          <button id="btn-pdf" class="primary" type="button">증빙서류 PDF</button>
+          <button id="btn-zip" type="button">파일 정리 ZIP</button>
+          <button id="btn-reset" class="ghost" type="button">전체 초기화</button>
+        </div>
+      </div>
+      <div id="summary"></div>
+      <div id="issues"></div>
+      <div id="journey"></div>
+    </section>
+
+    <!-- 4. 문서별 인식 결과 -->
+    <section id="docs-sec" class="card" hidden>
+      <h2><span class="step">4</span>문서별 인식 결과 <small>잘못 인식된 항목은 직접 고치면 바로 재점검됩니다</small></h2>
+      <div id="docs" class="docs"></div>
+    </section>
+  </main>
+</div>
+
+<div id="viewer" class="viewer" hidden><button type="button" class="close" aria-label="닫기">×</button><div class="body"></div></div>
+
+<script src="lib/jszip.min.js"></script>
+<script src="lib/pdfjs/pdf.min.js"></script>
+<script src="lib/tesseract/tesseract.min.js"></script>
+<script src="js/extract.js"></script>
+<script src="js/analyze.js"></script>
+<script src="js/ingest.js"></script>
+<script src="js/evidence.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
