@@ -50,7 +50,8 @@
 
   const MILEAGE_KW = ['마일리지', 'mileage', '스카이패스', 'skypass', '아시아나클럽', 'asianaclub', 'asiana club',
     '나비포인트', '리프레시포인트', 'refreshpoint', 'refresh point', '적립확인', '탑승마일', '마일리지적립', '적립내역', '적립예정',
-    '항공권탑승', '탑승적립', '(적립)', '포인트조회', '사용가능포인트', '적립포인트', '소멸일자', '소멸포인트'];
+    '항공권탑승', '탑승적립', '(적립)', '포인트조회', '사용가능포인트', '적립포인트', '소멸일자', '소멸포인트',
+    '총적립', '적립일', '적립처', '적립/사용', '마일리지조회'];
   const FN_MILEAGE = ['마일리지', 'mileage', '적립', 'skypass', '스카이패스', '포인트'];
   // 편명 코드 → 항공사
   const AIRLINE_CODE = { KE: '대한항공', OZ: '아시아나항공', LJ: '진에어', '7C': '제주항공', TW: '티웨이항공', BX: '에어부산',
@@ -62,7 +63,8 @@
   const FLIGHT_RE = /(?<![A-Z0-9])(KE|OZ|7C|LJ|TW|BX|RS|ZE|RF|YP|4V|4H)\s?(\d{2,4})(?!\d)/g;
   // OCR이 OZ를 0Z/0z로 읽는 경우 보정
   const fixFlightOcr = t => t.replace(/(?<![A-Za-z0-9])0[Zz](?=\s?\d{3,4}(?!\d))/g, 'OZ')
-    .replace(/\[\s*0[2Zz]\s?(\d{3,4})\s*\]/g, '[OZ$1]'); // 영수증 '[OZ8735]'를 '[028735]'로 읽는 경우
+    .replace(/\[\s*0[2Zz]\s?(\d{3,4})\s*\]/g, '[OZ$1]') // 영수증 '[OZ8735]'를 '[028735]'로 읽는 경우
+    .replace(/^(\s*)0[27Zz]\s?(\d{4})(?=\s*$)/gm, '$1OZ$2'); // 마일리지 내역의 한 줄짜리 'OZ8199'를 '078199'로 읽는 경우
   function findFlights(text) {
     const out = new Set(); let m; FLIGHT_RE.lastIndex = 0;
     while ((m = FLIGHT_RE.exec(fixFlightOcr(text).toUpperCase()))) out.add(m[1] + m[2]);
@@ -92,6 +94,12 @@
     GMP: '김포', ICN: '인천', CJU: '제주', PUS: '김해', TAE: '대구', CJJ: '청주', KWJ: '광주', RSU: '여수',
     USN: '울산', HIN: '사천', KPO: '포항경주', YNY: '양양', WJU: '원주', KUV: '군산', MWX: '무안',
   };
+  // 영문 공항/도시 이름 (탑승권 영문 표기)
+  const PLACE_EN = {
+    GIMPO: '김포', SEOUL: '서울', INCHEON: '인천', JEJU: '제주', GIMHAE: '김해', BUSAN: '부산', DAEGU: '대구',
+    CHEONGJU: '청주', GWANGJU: '광주', YEOSU: '여수', ULSAN: '울산', SACHEON: '사천', POHANG: '포항경주',
+    POHANGGYEONGJU: '포항경주', YANGYANG: '양양', WONJU: '원주', GUNSAN: '군산', MUAN: '무안',
+  };
   const PLACES = [
     '서울', '용산', '수서', '동탄', '평택지제', '광명', '영등포', '청량리', '상봉', '행신', '천안아산', '천안', '오송',
     '대전', '서대전', '김천구미', '동대구', '서대구', '대구', '신경주', '경주', '울산', '부산', '구포', '밀양', '마산',
@@ -114,6 +122,7 @@
     if (!tok) return null;
     const up = tok.toUpperCase().trim();
     if (IATA[up]) return IATA[up];
+    if (PLACE_EN[up.replace(/[\s\-]/g, '')]) return PLACE_EN[up.replace(/[\s\-]/g, '')];
     const n = normPlace(tok);
     if (PLACES.includes(n)) return n;
     for (const p of PLACES) if (n.startsWith(p) || n.endsWith(p)) return p;
@@ -338,7 +347,13 @@
     let m;
     while ((m = re.exec(line))) {
       const tok = m[0];
-      const place = /[가-힣]/.test(tok) ? placeOfWord(tok) : tok.length === 3 ? fuzzyIata(tok) : null;
+      // 마일리지 내역의 'RSUCJU'처럼 공항코드 두 개가 붙은 구간 표기
+      if (/^[A-Z]{6}$/.test(tok) && IATA[tok.slice(0, 3)] && IATA[tok.slice(3)]) {
+        items.push({ place: IATA[tok.slice(0, 3)], start: m.index, end: m.index + 3, pair: true });
+        items.push({ place: IATA[tok.slice(3)], start: m.index + 3, end: m.index + 6, pair: true });
+        continue;
+      }
+      const place = /[가-힣]/.test(tok) ? placeOfWord(tok) : tok.length === 3 ? fuzzyIata(tok) : PLACE_EN[tok.toUpperCase()] || null;
       const prev = items[items.length - 1];
       if (prev && /^\s*[(\/]\s*$/.test(line.slice(prev.end, m.index))) {
         if (!prev.place || (place && AIRPORT_NAMES.has(place) && !AIRPORT_NAMES.has(prev.place))) prev.place = place || prev.place;
@@ -358,7 +373,7 @@
       if (ps.length < 2) continue;
       const near = [lines[i - 1], lines[i], lines[i + 1]].some(l => l && ROUTE_LABEL.test(l));
       const sep = ROUTE_SEP.test(lines[i].slice(ps[0].end, ps[1].start));
-      if (near || sep) return { from: ps[0].place, to: ps[1].place };
+      if (near || sep || (ps[0].pair && ps[1].pair)) return { from: ps[0].place, to: ps[1].place };
     }
     return null;
   }
@@ -508,8 +523,13 @@
   function findEarnDates(text, dates) {
     const out = [];
     for (const d of dates) {
-      const before = preCtx(text, d.idx, 25), after = compact(text.slice(d.idx + d.len, d.idx + d.len + 8));
-      if (/(소멸|만료|유효|날짜선택|조회|기간)/.test(before) || /~$/.test(before) || /^(\([월화수목금토일]\))?~/.test(after)) continue;
+      // 라벨은 같은 줄이나 바로 윗줄(라벨만 있는 줄)에서 찾는다. 위의 안내문('…상세내역 조회 결과입니다')은 라벨이 아님
+      const ls = text.lastIndexOf('\n', d.idx - 1) + 1;
+      const prevLine = compact(text.slice(text.lastIndexOf('\n', ls - 2) + 1, ls));
+      const before = compact(text.slice(ls, d.idx));
+      const label = before + (prevLine.length <= 12 ? '|' + prevLine : '');
+      const after = compact(text.slice(d.idx + d.len, d.idx + d.len + 8));
+      if (/(소멸|만료|유효|날짜선택|조회|기간)/.test(label) || /~$/.test(before) ||/^(\([월화수목금토일]\))?~/.test(after)) continue;
       if (!out.includes(d.date)) out.push(d.date);
     }
     return out;
@@ -543,7 +563,9 @@
       car: hasKm ? 2 + countKw(c, CAR_KW) * 2 : countKw(c, CAR_KW),
       fuel: countKw(c, FUEL_KW) * 2 + (/\d[,.]?\d{3}\s*(원\s*\/\s*[lℓL리])/.test(text) ? 2 : 0),
       official: countKw(c, OFFICIAL_KW) + (/^hwpx?$/.test(ext) ? 8 : 0),
-      mileage: (n => n >= 2 ? n * 4 : n * 2)(countKw(c, MILEAGE_KW)) + (countKw(fn, FN_MILEAGE) ? 10 : 0),
+      mileage: (n => n >= 2 ? n * 4 : n * 2)(countKw(c, MILEAGE_KW)) + (countKw(fn, FN_MILEAGE) ? 10 : 0) +
+        // '2026.10.23 OZ8199 RSUCJU +109' 같은 적립 행이 여러 줄이면 적립내역 화면
+        ((text.match(/20\d{2}\s*[.\-\/]\s*\d{1,2}\s*[.\-\/]\s*\d{1,2}[^\n]*\+\s*\d[\d,]*\s*$/gm) || []).length >= 2 ? 6 : 0),
     };
     for (const k in FN_HINT) if (countKw(fn, FN_HINT[k])) s[k] += 6;
     // 지도 캡처에도 '버스','도착' 등이 섞이므로 km+지도 키워드가 강하면 자차 우선

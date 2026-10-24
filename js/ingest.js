@@ -45,10 +45,10 @@
       img.src = url;
     });
   }
-  function toCanvas(img, maxSide) {
+  function toCanvas(img, maxSide, scale) {
     let w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
-    let s = 1;
-    if (Math.max(w, h) < 1300) s = Math.min(2.5, 1600 / Math.max(w, h));
+    let s = scale || 1;
+    if (!scale && Math.max(w, h) < 1300) s = Math.min(2.5, 1600 / Math.max(w, h));
     if (maxSide && Math.max(w, h) * s > maxSide) s = maxSide / Math.max(w, h);
     const c = document.createElement('canvas');
     c.width = Math.round(w * s); c.height = Math.round(h * s);
@@ -71,7 +71,14 @@
     doc.thumb = doc.previewUrl;
     const img = await loadImage(doc.previewUrl);
     step('글자 인식 중');
-    return ocr(toCanvas(img, 4000), p => step('글자 인식 중', p));
+    const text = await ocr(toCanvas(img, 4000), p => step('글자 인식 중', p));
+    // 마일리지 적립내역의 회색 편명(OZ8199 등)은 원본 크기로는 거의 못 읽음 → 확대해서 한 번 더 인식
+    if (/마일리지|적립/.test(text) && global.Extract && !global.Extract.findFlights(text).length) {
+      step('글자 인식 중(확대)');
+      const big = await ocr(toCanvas(img, 4000, 1.6), p => step('글자 인식 중(확대)', p));
+      if (global.Extract.findFlights(big).length) return big;
+    }
+    return text;
   }
 
   async function readPdf(doc, buf, step) {
