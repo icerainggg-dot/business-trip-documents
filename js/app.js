@@ -25,17 +25,22 @@
   drop.addEventListener('drop', e => addFiles(e.dataTransfer.files));
 
   // 내용이 같은 파일(이름이 달라도)은 다시 읽지 않고 건너뜀. 앞서 읽기 실패한 파일이면 새 것으로 교체
+  async function hashOf(file) {
+    try { return Ingest.hashOf(await file.arrayBuffer()); } catch (e) { return ''; /* 읽기 오류는 처리 단계에서 표시 */ }
+  }
+  function newDoc(file, hash) {
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    return { id: 'd' + (++state.seq), file, name: file.name, ext, hash, status: 'queued', step: '대기', f: { type: 'other', dir: 'auto' } };
+  }
   async function addFiles(files) {
     const list = [...files];
     const skipped = [];
     for (const file of list) {
-      let hash = '';
-      try { hash = Ingest.hashOf(await file.arrayBuffer()); } catch (e) { /* 읽기 오류는 처리 단계에서 표시 */ }
+      const hash = await hashOf(file);
       const prev = hash && state.docs.find(d => d.hash === hash);
       if (prev && prev.status !== 'error') { skipped.push(file.name === prev.name ? file.name : `${file.name}(=${prev.name})`); continue; }
       if (prev) removeDoc(prev);
-      const ext = (file.name.split('.').pop() || '').toLowerCase();
-      const doc = { id: 'd' + (++state.seq), file, name: file.name, ext, hash, status: 'queued', step: '대기', f: { type: 'other', dir: 'auto' } };
+      const doc = newDoc(file, hash);
       state.docs.push(doc);
       queue.push(doc);
       renderDocCard(doc);
@@ -51,6 +56,35 @@
     const card = docsBox.querySelector(`[data-id="${doc.id}"]`);
     if (card) card.remove();
     if (doc.previewUrl) URL.revokeObjectURL(doc.previewUrl);
+  }
+
+  // 파일 교체: 문서 카드의 [교체] → 새 파일을 같은 자리에 넣고 다시 인식 (예: 금액이 다른 영수증을 맞는 것으로 바꿀 때)
+  const replaceInput = Object.assign(document.createElement('input'), { type: 'file', accept: fileInput.accept, hidden: true });
+  document.body.appendChild(replaceInput);
+  let replaceTarget = null;
+  replaceInput.addEventListener('change', () => {
+    const file = replaceInput.files[0], old = replaceTarget;
+    replaceInput.value = ''; replaceTarget = null;
+    if (file && old && state.docs.includes(old)) replaceDoc(old, file);
+  });
+  async function replaceDoc(old, file) {
+    const hash = await hashOf(file);
+    if (hash && hash === old.hash) { alert(`${file.name}은(는) 지금 등록된 파일과 같은 파일입니다.`); return; }
+    const same = hash && state.docs.find(d => d !== old && d.hash === hash && d.status !== 'error');
+    if (same) { alert(`${file.name}은(는) 이미 등록된 ${same.name}과(와) 같은 파일이라 교체하지 않았습니다.`); return; }
+    if (!state.docs.includes(old)) return;
+    const doc = newDoc(file, hash);
+    state.docs[state.docs.indexOf(old)] = doc;
+    if (old.previewUrl) URL.revokeObjectURL(old.previewUrl);
+    const oldCard = docsBox.querySelector(`[data-id="${old.id}"]`);
+    renderDocCard(doc);
+    const card = docsBox.querySelector(`[data-id="${doc.id}"]`);
+    if (oldCard) docsBox.replaceChild(card, oldCard);
+    card.classList.add('flash');
+    queue.push(doc);
+    updateProgress();
+    scheduleAnalyze(0);
+    pump();
   }
 
   async function pump() {
@@ -74,6 +108,8 @@
         doc.status = 'error';
         doc.error = e.message || String(e);
       }
+      // 읽는 동안 삭제·교체된 문서는 카드를 다시 그리지 않음
+      if (!state.docs.includes(doc)) { if (doc.previewUrl) URL.revokeObjectURL(doc.previewUrl); updateProgress(); scheduleAnalyze(50); continue; }
       renderDocCard(doc);
       updateProgress();
       scheduleAnalyze(50);
@@ -158,13 +194,18 @@
     el.innerHTML = `
       <div class="thumb" data-act="view">${thumbHtml(doc)}</div>
       <div class="meta">
-        <div class="name" title="${esc(doc.name)}">${esc(doc.name)}</div>
+        <div class="name-row">
+          <div class="name" title="${esc(doc.name)}">${esc(doc.name)}</div>
+          <div class="card-acts">
+            <button type="button" data-act="replace" title="다른 파일로 바꿔 다시 인식">교체</button>
+            <button type="button" class="del" data-act="del" title="이 파일 삭제">삭제</button>
+          </div>
+        </div>
         <div class="status">${statusHtml(doc)}${doc.note ? `<span class="tag">${esc(doc.note)}</span>` : ''}</div>
         ${ready ? `<label class="type">종류<select data-k="type">${typeSel}</select></label>
         <div class="fields">${fields}</div>
         <details><summary>인식된 텍스트</summary><pre>${esc(doc.text || '(텍스트 없음)')}</pre></details>` : ''}
-      </div>
-      <button type="button" class="del" data-act="del" title="삭제">×</button>`;
+      </div>`;
   }
   const LABEL_BY_TYPE = { mileage: { date: '적립일' } };
   function fieldHtml(k, v, type) {
@@ -199,6 +240,9 @@
       $('#docs-sec').hidden = !state.docs.length;
       updateProgress();
       scheduleAnalyze(0);
+    } else if (act.dataset.act === 'replace') {
+      replaceTarget = doc;
+      replaceInput.click();
     } else if (act.dataset.act === 'view') openViewer(doc);
   });
 
@@ -253,7 +297,7 @@
         <div class="leg-d">${esc(l.date || '날짜 미상')} ${esc(l.time || '')} ${esc(l.vehicleNo || '')}</div>
         <div class="pair">
           <div class="${l.receipts.length ? 'has' : 'miss'}">영수증 ${l.receipts.length ? l.receipts.map(docLink).join(', ') : '<em>없음</em>'}</div>
-          <div class="${l.confirm ? 'has' : 'miss'}">확인서 ${l.confirm ? docLink(l.confirm) : '<em>없음</em>'}</div>
+          <div class="${l.confirm ? 'has' : 'miss'}">확인서 ${l.confirm ? docLink(l.confirm) + (l.confirmDups.length ? ` (같은 편: ${l.confirmDups.map(docLink).join(', ')})` : '') : '<em>없음</em>'}</div>
           ${l.needsMileage ? `<div class="${l.mileage ? 'has' : 'miss'}">마일리지 ${l.mileage ? `${docLink(l.mileage)} · ${esc(mileageInfo(l.mileage))}` : '<em>없음</em>'}</div>` : ''}
         </div>
         <ul class="checks">${l.checks.map(chk).join('')}</ul>

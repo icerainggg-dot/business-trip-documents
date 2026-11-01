@@ -36,9 +36,11 @@
     '운행', '확인서', '탑승내역', '이용확인', 'seat', 'passenger', '탑승자', '탑승증명', '승차권번호'];
   const LODGING_KW = ['숙박', '호텔', 'hotel', '객실', '체크인', '체크아웃', 'check-in', 'checkin', 'check-out', 'checkout',
     '입실', '퇴실', '투숙', '리조트', 'resort', '모텔', '펜션', '게스트하우스', '레지던스', '야놀자', '여기어때',
-    '아고다', 'agoda', '호텔스닷컴', 'hotels.com', '부킹닷컴', 'booking.com', '에어비앤비', 'airbnb', '숙소', '룸타입', '객실타입'];
+    '아고다', 'agoda', '호텔스닷컴', 'hotels.com', '부킹닷컴', 'booking.com', '에어비앤비', 'airbnb', '숙소', '룸타입', '객실타입',
+    '놀유니버스'];
   const LODGING_CONFIRM_KW = ['예약확인', '투숙확인', '숙박확인', '확인서', '바우처', 'voucher', '예약내역', '투숙객',
-    '예약자', 'confirmation', '숙박일정', '이용확인', '투숙사실', '숙박사실', '예약완료', '예약상세'];
+    '예약자', 'confirmation', '숙박일정', '이용확인', '투숙사실', '숙박사실', '예약완료', '예약상세', '숙소예약번호', '이용자정보',
+    '상품및이용정보'];
   const CAR_KW = ['길찾기', '경로', '소요시간', '예상시간', '자동차', '자가용', '카카오맵', 'kakaomap', '네이버지도',
     '네이버맵', 'navermap', '티맵', 'tmap', '카카오내비', '최적', '추천경로', '큰길우선', '무료도로', '통행료',
     '최단', '고속도로', '내비', '주행', '택시비', '예상요금', '도착예정'];
@@ -59,7 +61,8 @@
   const AIRLINE_KW = [['대한항공', '대한항공'], ['koreanair', '대한항공'], ['korean air', '대한항공'], ['아시아나', '아시아나항공'],
     ['asiana', '아시아나항공'], ['진에어', '진에어'], ['jinair', '진에어'], ['jin air', '진에어'], ['제주항공', '제주항공'],
     ['jejuair', '제주항공'], ['jeju air', '제주항공'], ['티웨이', '티웨이항공'], ["t'way", '티웨이항공'], ['트리니티항공', '티웨이항공'],
-    ['에어부산', '에어부산'], ['에어서울', '에어서울'], ['이스타', '이스타항공'], ['에어로케이', '에어로케이'], ['에어프레미아', '에어프레미아']];
+    ['에어부산', '에어부산'], ['airbusan', '에어부산'], ['에어서울', '에어서울'], ['airseoul', '에어서울'], ['이스타', '이스타항공'],
+    ['eastar', '이스타항공'], ['에어로케이', '에어로케이'], ['에어프레미아', '에어프레미아']];
   const FLIGHT_RE = /(?<![A-Z0-9])(KE|OZ|7C|LJ|TW|BX|RS|ZE|RF|YP|4V|4H)\s?(\d{2,4})(?!\d)/g;
   // OCR이 OZ를 0Z/0z로 읽는 경우 보정
   const fixFlightOcr = t => t.replace(/(?<![A-Za-z0-9])0[Zz](?=\s?\d{3,4}(?!\d))/g, 'OZ')
@@ -205,8 +208,11 @@
   }
   const preCtx = (text, idx, n = 22) => compact(text.slice(Math.max(0, idx - n), idx));
 
-  const PURCHASE_CTX = /(결제|발권|구매|승인|발행|예매일|예약일|거래|출력|인쇄|조회|주문|입금|환불|취소|작성|등록|발급|시행일|기준일|조사일|생성|issu|print)/;
+  const PURCHASE_CTX = /(결제|발권|구매|승인|발행|예매일|예약일|거래|출력|인쇄|조회|주문|입금|환불|취소|작성|등록|발급|시행일|기준일|조사일|생성|issu|print|(approval|payment|reservation|booking|transaction|purchase|order)date)/;
   const TRAVEL_CTX = /(탑승|승차|출발|운행|이용일|여정|가는|오는|일자|날짜|date|dep|체크인|입실|일시)/;
+  // '예약일자'·'결제일시'·'Payment Date'의 '일자/일시/date'는 탑승일 근거가 아님
+  const PURCHASE_DATE_LABEL = /(결제|발권|구매|승인|발행|예매|예약|거래|주문|입금|환불|취소|작성|등록|발급|시행|기준|조사|생성)일(자|시)?|(approval|payment|reservation|booking|transaction|purchase|order|issue|issuing)date/g;
+  const isTravelCtx = c => TRAVEL_CTX.test(c.replace(PURCHASE_DATE_LABEL, ''));
 
   function pickTravelDate(text, dates) {
     if (!dates.length) return { travelDate: '', payDate: '' };
@@ -221,9 +227,9 @@
       const c = compact(text.slice(ps, d.idx)).slice(-40);
       let s = 0;
       if (PURCHASE_CTX.test(label)) { s -= 4; if (!pay) pay = d.date; }
-      else if (TRAVEL_CTX.test(label)) s += 3;
+      else if (isTravelCtx(label)) s += 3;
       else {
-        if (TRAVEL_CTX.test(c)) s += 2;
+        if (isTravelCtx(c)) s += 2;
         if (PURCHASE_CTX.test(c)) { s -= 3; if (!pay) pay = d.date; }
       }
       // 근거가 같으면 늦은 날짜 우선 (결제일은 보통 탑승일보다 앞섬)
@@ -251,8 +257,25 @@
   }
 
   // ───────────────────────── 금액/번호 ─────────────────────────
-  function findAmount(text) {
+  function normAmountText(text) {
     text = text.replace(/[ \t]{2,}/g, ' '); // OCR 표의 긴 공백 때문에 '승인금액 … KRW 54,900'을 못 잇는 문제
+    // '8만 8,933원' → '88,933원'
+    text = text.replace(/(?<![\d,])(\d{1,4})\s*만\s*(\d{1,3}(?:,\d{3})|\d{1,4})?\s*원/g,
+      (_, a, b) => (+a * 10000 + (toNum(b) || 0)).toLocaleString('en-US') + '원');
+    // 라벨만 있는 줄 다음 줄에 금액만 있는 경우 ('결제금액 Amount' ↵ '59,900') 한 줄로 합침
+    return text.replace(/^([^\d\n]*(?:금\s*액|amount|합\s*계|total)[^\d\n]*)\n(\s*(?:KRW|₩)?\s*\d{1,3}(?:,\d{3})+\s*원?\s*)$/gim, '$1 $2');
+  }
+  // 문서에 적힌 금액 전부 (주문금액·승인금액 등). 할인 등 음수 금액은 제외
+  function findAllAmounts(text) {
+    const out = new Set();
+    for (const m of normAmountText(text).matchAll(/(?<![\d,.\-])\d{1,3}(?:,\d{3})+(?![\d,])/g)) {
+      const v = toNum(m[0]);
+      if (v >= 1000 && v <= 20000000) out.add(v);
+    }
+    return [...out];
+  }
+  function findAmount(text) {
+    text = normAmountText(text);
     const re = /(결\s*제\s*금\s*액|승\s*인\s*금\s*액|합\s*계(?:\s*금\s*액)?|총\s*(?:결\s*제\s*)?금\s*액|총\s*액|결\s*제\s*액|받\s*[을은]\s*금\s*액|청\s*구\s*금\s*액|이\s*용\s*금\s*액|판\s*매\s*금\s*액|운\s*임|요\s*금|금\s*액|total|amount)[^\d\n]{0,20}?(\d{1,3}(?:[,.]\d{3})+|\d{3,8})(?!\d)/gi;
     const prio = l => {
       const c = compact(l);
@@ -409,7 +432,9 @@
 
   function findTimes(text) {
     const out = [];
-    const re = /(?<![\d:])([01]?\d|2[0-3])\s*:\s*([0-5]\d)(?![\d:])/g;
+    const re = /(?<![\d:])([01]?\d|2[0-3])\s*:\s*([0-5]\d)(:[0-5]\d)?(?![\d:])/g;
+    // 초까지 있는 시각(21:05:57)은 대개 결제 시각 → 초 없는 시각이 하나도 없을 때만 쓴다 (이스타 '2026-10-27 16:40:00' 등)
+    const withSec = [];
     // 휴대폰 캡처 첫 줄(상태표시줄)의 현재 시각은 제외
     const first = /^\s*([^\n]*)/.exec(text);
     const statusEnd = first && !/[가-힣]/.test(first[1]) ? first[0].length : 0;
@@ -417,14 +442,22 @@
     while ((m = re.exec(text))) {
       if (m.index < statusEnd) continue;
       const c = preCtx(text, m.index, 25);
-      if (/(결제|승인|거래|발행|출력|조회|인쇄|발권|구매|주문|예매일)/.test(c)) continue;
-      out.push(`${p2(m[1])}:${m[2]}`);
+      if (/(결제|승인|거래|발행|출력|조회|인쇄|발권|구매|주문|예매일|approval|payment|transaction)/.test(c)) continue;
+      (m[3] ? withSec : out).push(`${p2(m[1])}:${m[2]}`);
     }
-    return out;
+    return out.length ? out : withSec;
   }
 
   function findVehicle(text) {
-    let m = /\b(KE|OZ|7C|LJ|TW|BX|RS|ZE|RF|YP|4V|4H)\s?(\d{2,4})\b/.exec(fixFlightOcr(text).replace(/\b(oz|ke)(?=\s?\d{2,4}\b)/gi, s => s.toUpperCase()));
+    const t = fixFlightOcr(text).replace(/\b(oz|ke)(?=\s?\d{2,4}\b)/gi, s => s.toUpperCase());
+    let m = /\b(KE|OZ|7C|LJ|TW|BX|RS|ZE|RF|YP|4V|4H)\s?(\d{2,4})\b/.exec(t);
+    // '편명:ZE284'의 항공사 코드를 OCR이 '가284'처럼 깨뜨린 경우: 문서의 항공사로 코드를 채움
+    // (예매 목록 캡처에서 깨진 첫 편 대신 아래쪽 다른 예약의 편명을 집는 문제)
+    const lb = /편\s*명\s*[:：]\s*([^\d\s:：]{1,2})\s?(\d{3,4})(?!\d)/.exec(t);
+    if (lb && !AIRLINE_CODE[lb[1].toUpperCase()] && (!m || lb.index < m.index)) {
+      const code = Object.keys(AIRLINE_CODE).find(k => AIRLINE_CODE[k] === airlineOf('', text));
+      if (code) return code + lb[2];
+    }
     if (m) return m[1] + m[2];
     m = /(KTX-?산천|KTX-?이음|KTX|SRT|ITX-?새마을|ITX-?청춘|ITX-?마음|새마을호?|무궁화호?|누리로)\s*-?\s*(\d{1,4})?(?!\d)/i.exec(text);
     if (m) return (m[1].toUpperCase() + (m[2] ? ' ' + m[2] : '')).trim();
@@ -469,7 +502,8 @@
     const lines = text.split(/\n/).map(s => s.trim()).filter(Boolean);
     for (const l of lines) {
       if (/(주소|address|사업자|tel|전화)/i.test(l)) continue;
-      if (/(호텔|hotel|리조트|resort|모텔|펜션|게스트하우스|레지던스|스테이|\binn\b|콘도)/i.test(l) && l.length <= 50) return l;
+      if (/(호텔|hotel|리조트|resort|모텔|펜션|게스트하우스|레지던스|스테이|\binn\b|콘도)/i.test(l) && l.length <= 50)
+        return l.replace(/^(상품명|숙소명|숙박업소|호텔명|가맹점명)\s*[:：]?\s*/, '').replace(/\s{2,}/g, ' ');
     }
     return '';
   }
@@ -552,7 +586,8 @@
     const c = compact(text);
     const fn = compact(filename);
     const modeScore = {};
-    for (const k in MODE_KW) modeScore[k] = countKw(c, MODE_KW[k]) + countKw(fn, MODE_KW[k]) * 2;
+    const cm = c.replace(/유니버스/g, ''); // 야놀자 운영사 '놀유니버스'의 '버스'는 교통수단이 아님
+    for (const k in MODE_KW) modeScore[k] = countKw(cm, MODE_KW[k]) + countKw(fn, MODE_KW[k]) * 2;
     const mode = Object.keys(modeScore).sort((a, b) => modeScore[b] - modeScore[a])[0];
     const modeBest = modeScore[mode];
     const hasKm = /\d\s*(km|㎞)/i.test(text);
@@ -578,7 +613,9 @@
 
     let docType = top;
     if (top === 'transport' || top === 'lodging') {
-      const r = countKw(c, RECEIPT_KW) + countKw(fn, FN_RECEIPT) * 5;
+      // 예약내역 화면 아래의 '영수증 조회하기' 같은 버튼 글자는 영수증 근거가 아님
+      const cr = c.replace(/영수증(조회|보기|발급|출력|확인)(하기)?/g, '');
+      const r = countKw(cr, RECEIPT_KW) + countKw(fn, FN_RECEIPT) * 5;
       const k = countKw(c, top === 'transport' ? CONFIRM_TR_KW : LODGING_CONFIRM_KW) + countKw(fn, FN_CONFIRM) * 5;
       let role = r > k ? 'receipt' : 'confirm';
       if (r === k && /(승인번호|카드번호|매출전표)/.test(c)) role = 'receipt';
@@ -627,6 +664,7 @@
       refs,
       approvals,
       amount: findAmount(text),
+      amounts: findAllAmounts(text),
       checkin: lod.checkin,
       checkout: lod.checkout,
       nights: lod.nights,

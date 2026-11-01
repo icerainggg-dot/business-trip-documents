@@ -45,7 +45,23 @@
       .forEach(d => add('info', '분류', `${d.name}: 자동 분류(${TYPE_LABEL[d.f.type]}) 신뢰도가 낮습니다. 확인해 주세요.`, [d.id]));
 
     // ───────── 교통: 영수증 ↔ 탑승확인서 연결 ─────────
-    const R = of('transport_receipt'), C = of('transport_confirm');
+    const R = of('transport_receipt');
+    // 같은 편(편명·이용일)의 탑승권 캡처가 여러 장이면 한 구간으로 묶는다 (탑승 전 QR 화면 + 탑승완료 화면 등).
+    // 증빙에는 '탑승완료/USED' 표시가 있는 캡처를 쓴다
+    const usedMark = d => /(탑승완료|사용완료|승차완료|이용완료|used)/i.test(X.compact(d.text));
+    const groups = [];
+    of('transport_confirm').forEach(c => {
+      const fno = X.normRef(c.f.vehicleNo);
+      const g = fno && c.f.date && groups.find(g => X.normRef(g[0].f.vehicleNo) === fno && g[0].f.date === c.f.date);
+      if (g) g.push(c); else groups.push([c]);
+    });
+    const C = groups.map(g => g.find(usedMark) || g[0]);
+    const dupOf = new Map(); // 대표 확인서 id → 같은 편의 다른 캡처
+    groups.filter(g => g.length > 1).forEach(g => {
+      const keep = C[groups.indexOf(g)], drops = g.filter(d => d !== keep);
+      dupOf.set(keep.id, drops);
+      add('info', '교통', `${keep.f.vehicleNo} ${fmtD(keep.f.date)} 편 탑승확인서가 ${g.length}장이라 한 구간으로 묶었습니다. 증빙서류에는 ${keep.name}만 넣습니다 (${drops.map(d => d.name).join(', ')} 제외).`, g.map(d => d.id));
+    });
     const link = new Map(); // confirm.id → [receipts]
     const rUsed = new Map(); // receipt.id → count
     const linkWhy = new Map();
@@ -66,6 +82,15 @@
       const r = R.find(r => free(r) && sameMode(c, r) && r.f.date && r.f.date === c.f.date &&
         X.samePlace(r.f.from, c.f.from) && X.samePlace(r.f.to, c.f.to));
       if (r) doLink(c, r, '날짜·구간');
+    });
+    // 2-1) 탑승일이 없는 영수증(예약일·결제일만 있는 진에어 지불영수증 등): 탑승확인서 날짜를 기준으로
+    //      같은 교통수단·항공사 + 구간 일치 + 결제일이 탑승일 이전이면 연결
+    unlinked().forEach(c => {
+      const r = R.find(r => free(r) && !r.f.date && sameMode(c, r) &&
+        r.f.from && r.f.to && c.f.from && c.f.to && X.samePlace(r.f.from, c.f.from) && X.samePlace(r.f.to, c.f.to) &&
+        (!r.f.airline || !c.f.airline || r.f.airline === c.f.airline) &&
+        (!c.f.date || !r.auto || !r.auto.payDate || r.auto.payDate <= c.f.date));
+      if (r) doLink(c, r, '구간·탑승일은 확인서 기준');
     });
     // 3) 같은 교통수단 + 같은 금액
     unlinked().forEach(c => {
@@ -91,7 +116,7 @@
       const base = c || rs[0];
       const pick = k => (c && c.f[k]) || (rs.find(r => r.f[k]) || {}).f?.[k] || '';
       return {
-        id: base.id, confirm: c, receipts: rs, why,
+        id: base.id, confirm: c, confirmDups: (c && dupOf.get(c.id)) || [], receipts: rs, why,
         mode: pick('mode') || 'etc', date: pick('date'), time: pick('time'), airline: pick('airline'),
         from: pick('from'), to: pick('to'), vehicleNo: pick('vehicleNo'),
         dirManual: (c && c.f.dir !== 'auto' && c.f.dir) || (rs.find(r => r.f.dir && r.f.dir !== 'auto') || {}).f?.dir || '',
@@ -278,7 +303,12 @@
           add('info', '교통', `${nm}: 확인서에서 출장자 성명(${trip.name})을 찾지 못했습니다. 본인 탑승 여부를 확인하세요.`, [c.id]);
       }
       if (l.needsMileage) l.checks.push({ ok: !!l.mileage, t: l.mileage ? `마일리지 확인서${l.mileageNote ? ` (탑승 후 ${l.mileageNote})` : ''}` : '마일리지 확인서 없음' });
-      if (!l.date) add('warn', '교통', `${nm}: 이용일자를 인식하지 못했습니다. 직접 입력하세요.`, ids);
+      if (!l.date) {
+        const pay = rs.map(r => r.auto && r.auto.payDate).find(Boolean);
+        add('warn', '교통', pay && !c
+          ? `${nm}: 영수증에 탑승일이 없습니다(결제일 ${fmtD(pay)}). 탑승확인서(탑승완료된 탑승권 캡처 등)를 첨부하거나 영수증 카드의 이용일을 직접 입력하세요.`
+          : `${nm}: 이용일자를 인식하지 못했습니다. 직접 입력하세요.`, ids);
+      }
       else if (start && end && (l.date < start || l.date > end))
         add('warn', '교통', `${nm}: 이용일(${l.date})이 출장기간(${start}~${end}) 밖입니다.`, ids);
       if (!l.from || !l.to) add('info', '교통', `${nm}: 출발지/도착지를 인식하지 못했습니다. 경유 연결 점검을 위해 입력을 권장합니다.`, ids);
@@ -318,8 +348,14 @@
           add('warn', '숙박', `${nm}: 영수증(${rc.checkin}~${rc.checkout || '?'})과 확인서(${cc.checkin}~${cc.checkout || '?'})의 숙박일이 다릅니다.`, ids);
         }
         if (num(rc.amount) && num(cc.amount) && num(rc.amount) !== num(cc.amount)) {
-          L.checks.push({ ok: false, t: '금액 불일치' });
-          add('warn', '숙박', `${nm}: 금액 불일치 (영수증 ${won(rc.amount)} ↔ 확인서 ${won(cc.amount)})`, ids);
+          // 확인서 금액이 영수증의 주문금액과 같으면 포인트 사용 등으로 실결제액만 다른 것
+          if (((L.receipt.auto && L.receipt.auto.amounts) || []).includes(num(cc.amount))) {
+            L.checks.push({ ok: true, t: `금액 확인 (주문 ${won(cc.amount)} · 실결제 ${won(rc.amount)})` });
+            add('info', '숙박', `${nm}: 확인서 금액 ${won(cc.amount)}은 영수증의 주문금액과 같고, 영수증 실결제액은 ${won(rc.amount)}입니다 (포인트 사용 등). 청구 금액을 확인하세요.`, ids);
+          } else {
+            L.checks.push({ ok: false, t: '금액 불일치' });
+            add('warn', '숙박', `${nm}: 금액 불일치 (영수증 ${won(rc.amount)} ↔ 확인서 ${won(cc.amount)}). 확인서를 결제 금액이 나온 화면으로 교체하거나 금액을 직접 고치세요.`, ids);
+          }
         }
       }
       if (!L.checkin || !L.checkout) add('warn', '숙박', `${nm}: 체크인/체크아웃 날짜를 인식하지 못했습니다. 직접 입력하세요.`, ids);
