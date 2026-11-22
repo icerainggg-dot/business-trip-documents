@@ -67,7 +67,8 @@
   // OCR이 OZ를 0Z/0z로 읽는 경우 보정
   const fixFlightOcr = t => t.replace(/(?<![A-Za-z0-9])0[Zz](?=\s?\d{3,4}(?!\d))/g, 'OZ')
     .replace(/\[\s*0[2Zz]\s?(\d{3,4})\s*\]/g, '[OZ$1]') // 영수증 '[OZ8735]'를 '[028735]'로 읽는 경우
-    .replace(/^(\s*)0[27Zz]\s?(\d{4})(?=\s*$)/gm, '$1OZ$2'); // 마일리지 내역의 한 줄짜리 'OZ8199'를 '078199'로 읽는 경우
+    .replace(/^(\s*)0[27Zz]\s?(\d{4})(?=\s*$)/gm, '$1OZ$2') // 마일리지 내역의 한 줄짜리 'OZ8199'를 '078199'로 읽는 경우
+    .replace(/(?<![A-Za-z0-9])L[Il1|](?=\s?\d{4}(?!\d))/g, 'LJ'); // 진에어 'LJ7484'를 'LI7484'로 읽는 경우
   function findFlights(text) {
     const out = new Set(); let m; FLIGHT_RE.lastIndex = 0;
     while ((m = FLIGHT_RE.exec(fixFlightOcr(text).toUpperCase()))) out.add(m[1] + m[2]);
@@ -225,9 +226,15 @@
       let ps = ls;
       for (let k = 0; k < 2 && ps > 0; k++) ps = text.lastIndexOf('\n', ps - 2) + 1;
       const c = compact(text.slice(ps, d.idx)).slice(-40);
+      // 영문 라벨이 값 아래 줄로 떨어지는 경우 (진에어 지불영수증: '예약일자 2026.11.09' ↵ 'Reservation Date')
+      const le = text.indexOf('\n', d.idx);
+      const nextRaw = le < 0 ? '' : text.slice(le + 1).split('\n')[0];
+      const next = /\d/.test(nextRaw) ? '' : compact(nextRaw).slice(0, 24);
       let s = 0;
       if (PURCHASE_CTX.test(label)) { s -= 4; if (!pay) pay = d.date; }
       else if (isTravelCtx(label)) s += 3;
+      else if (next && PURCHASE_CTX.test(next)) { s -= 4; if (!pay) pay = d.date; }
+      else if (next && isTravelCtx(next)) s += 3;
       else {
         if (isTravelCtx(c)) s += 2;
         if (PURCHASE_CTX.test(c)) { s -= 3; if (!pay) pay = d.date; }
@@ -389,12 +396,69 @@
     for (const it of items) if (it.place && (!out.length || out[out.length - 1].place !== it.place)) out.push(it);
     return out;
   }
+  // 출발/도착 라벨 (항공사·철도·버스 공통). OCR이 'To'를 '10'으로 읽는 경우 포함
+  const DEP_LABEL = /(출\s*발|from|departure|\bdep\b|origin)/i;
+  const ARR_LABEL = /(도\s*착|\bto\b|arrival|\barr\b|destination|\(\s*[1lI][0oO]\s*\))/i;
+  const DEP_WORD = /^(출발(지|역|공항|터미널)?|from|departure|dep|origin)$/i;
+  const ARR_WORD = /^(도착(지|역|공항|터미널)?|to|arrival|arr|destination|[1lI][0oO])$/i;
+  // 낱말 하나 → 장소 (한글 지명·공항코드·영문 도시명, OCR로 한 글자 틀린 공항코드 포함)
+  function placeOfToken(tok) {
+    const t = String(tok || '').replace(/[^가-힣A-Za-z0-9]/g, '');
+    if (t.length < 2) return null;
+    if (/[가-힣]/.test(t)) return placeOfWord(t);
+    return (t.length === 3 && fuzzyIata(t)) || PLACE_EN[t.toUpperCase()] || null;
+  }
+
+  /*
+   * 화면 배치로 구간 찾기 (탑승권·승차권 캡처는 항공사·운송사마다 모양이 달라도 배치 규칙은 같음)
+   *  words: [{ text, bbox:{x0,y0,x1,y1} }] (y는 아래로 증가) – OCR 단어 좌표 또는 PDF 글자 좌표
+   *  1) '출발/From/Departure' 라벨의 아래·오른쪽에 가장 가까운 지명 = 출발지, '도착/To/Arrival' 쪽 = 도착지
+   *  2) 라벨이 없으면 지명이 2개 이상 있는 줄 중 글씨가 가장 큰 줄에서 왼쪽 → 오른쪽
+   */
+  function routeFromLayout(words) {
+    const ws = (words || []).filter(w => w && w.text && w.bbox && w.text.trim())
+      .map(w => ({ text: w.text.trim(), b: w.bbox, h: Math.max(1, w.bbox.y1 - w.bbox.y0) }));
+    const places = ws.map(w => Object.assign({ place: placeOfToken(w.text) }, w)).filter(w => w.place);
+    if (!places.length) return null;
+    const bare = s => s.replace(/[()（）:：\[\]]/g, '');
+    const nearestPlace = lb => {
+      let best = null;
+      for (const p of places) {
+        if (p === lb) continue;
+        const dy = p.b.y0 - lb.b.y0, dx = p.b.x0 - lb.b.x0;
+        const sameRow = Math.abs(dy) < lb.h * 0.6;
+        if (sameRow ? p.b.x0 < lb.b.x1 : (dy < 0 || dy > lb.h * 6)) continue; // 같은 줄이면 오른쪽, 아니면 아래쪽만
+        const d = Math.abs(dx) + Math.abs(dy) * 1.5;
+        if (!best || d < best.d) best = { place: p.place, d };
+      }
+      return best;
+    };
+    const pick = re => ws.filter(w => re.test(bare(w.text))).map(nearestPlace).filter(Boolean).sort((a, b) => a.d - b.d)[0];
+    const dep = pick(DEP_WORD), arr = pick(ARR_WORD);
+    if (dep && arr && dep.place !== arr.place) return { from: dep.place, to: arr.place, by: 'label' };
+    // 라벨 없음: 같은 줄(세로 중심이 가까운) 지명 묶음
+    const rows = [];
+    places.slice().sort((a, b) => a.b.y0 - b.b.y0).forEach(p => {
+      const cy = (p.b.y0 + p.b.y1) / 2;
+      const r = rows.find(r => Math.abs(r.cy - cy) < Math.max(r.h, p.h) * 0.6);
+      if (r) r.items.push(p); else rows.push({ cy, h: p.h, items: [p] });
+    });
+    const cand = rows.map(r => {
+      const it = r.items.sort((a, b) => a.b.x0 - b.b.x0);
+      const seq = it.filter((p, i) => i === 0 || p.place !== it[i - 1].place).map(p => p.place);
+      return { seq, h: Math.max(...it.map(p => p.h)) };
+    }).filter(r => r.seq.length >= 2 && r.seq[0] !== r.seq[1]).sort((a, b) => b.h - a.h)[0];
+    return cand ? { from: cand.seq[0], to: cand.seq[1], by: 'row' } : null;
+  }
+
   function findRouteByLine(text) {
     const lines = text.split('\n');
     for (let i = 0; i < lines.length; i++) {
       const ps = placesInLine(lines[i]);
       if (ps.length < 2) continue;
-      const near = [lines[i - 1], lines[i], lines[i + 1]].some(l => l && ROUTE_LABEL.test(l));
+      // '출발 (From) … 도착 (To)' 머리줄 바로 아래 줄의 지명 두 개 (탑승권 공통 배치)
+      const head = [lines[i - 1], lines[i - 2]].some(l => l && DEP_LABEL.test(l) && ARR_LABEL.test(l) && placesInLine(l).length === 0);
+      const near = head || [lines[i - 1], lines[i], lines[i + 1]].some(l => l && ROUTE_LABEL.test(l));
       const sep = ROUTE_SEP.test(lines[i].slice(ps[0].end, ps[1].start));
       if (near || sep || (ps[0].pair && ps[1].pair)) return { from: ps[0].place, to: ps[1].place };
     }
@@ -417,8 +481,9 @@
       while ((r = re.exec(tc))) { const p = matchPlace(r[1]); if (p) return p; }
       return null;
     };
-    const from = take(/출\s*발(?:역|지|공항|터미널)?\s*[:：]?\s*([가-힣A-Z]{2,14})/g);
-    const to = take(/도\s*착(?:역|지|공항|터미널)?\s*[:：]?\s*([가-힣A-Z]{2,14})/g);
+    // '출발역: 서울', '출발 (From) 제주', 'From: GIMPO', 'Departure ICN' 등. 라벨과 지명이 줄바꿈으로 떨어진 경우도 허용
+    const from = take(/(?:출\s*발(?:역|지|공항|터미널)?(?:\s*\(?\s*from\s*\)?)?|\bfrom\b|departure|\bdep\b)\s*[:：]?\s*([가-힣A-Za-z]{2,14})/gi);
+    const to = take(/(?:도\s*착(?:역|지|공항|터미널)?(?:\s*\(?\s*to\s*\)?)?|\bto\b|arrival|\barr\b)\s*[:：]?\s*([가-힣A-Za-z]{2,14})/gi);
     if (from && to && from !== to) return { from, to };
     const codes = [];
     const reCode = new RegExp('\\b(' + Object.keys(IATA).join('|') + ')\\b', 'g');
@@ -556,7 +621,9 @@
   // 마일리지/포인트 적립일: 조회기간(~ 범위)·소멸/만료일은 제외
   function findEarnDates(text, dates) {
     const out = [];
+    const far = `${new Date().getFullYear() + 2}`; // 유효기간 열(적립일 + 3년 등)의 날짜는 적립일이 아님
     for (const d of dates) {
+      if (d.date >= far) continue;
       // 라벨은 같은 줄이나 바로 윗줄(라벨만 있는 줄)에서 찾는다. 위의 안내문('…상세내역 조회 결과입니다')은 라벨이 아님
       const ls = text.lastIndexOf('\n', d.idx - 1) + 1;
       const prevLine = compact(text.slice(text.lastIndexOf('\n', ls - 2) + 1, ls));
@@ -600,7 +667,10 @@
       official: countKw(c, OFFICIAL_KW) + (/^hwpx?$/.test(ext) ? 8 : 0),
       mileage: (n => n >= 2 ? n * 4 : n * 2)(countKw(c, MILEAGE_KW)) + (countKw(fn, FN_MILEAGE) ? 10 : 0) +
         // '2026.10.23 OZ8199 RSUCJU +109' 같은 적립 행이 여러 줄이면 적립내역 화면
-        ((text.match(/20\d{2}\s*[.\-\/]\s*\d{1,2}\s*[.\-\/]\s*\d{1,2}[^\n]*\+\s*\d[\d,]*\s*$/gm) || []).length >= 2 ? 6 : 0),
+        ((text.match(/20\d{2}\s*[.\-\/]\s*\d{1,2}\s*[.\-\/]\s*\d{1,2}[^\n]*\+\s*\d[\d,]*\s*$/gm) || []).length >= 2 ? 6 : 0) +
+        // 진에어 나비포인트 내역: '2026.11.12(목) 적립 제주(CJU)-청주(CJJ) /LJ7484 10' 행 + '포인트' 열
+        // 항공사 포인트/마일리지 내역 표: '2026.11.12(목) 적립 제주(CJU)-청주(CJJ) /LJ7484 10' 같은 행 + '포인트/마일' 열
+        (/(포인트|마일)/.test(c) && /20\d{2}\s*[.\-\/]?\s*\d{1,2}\s*[.\-\/]?\s*\d{1,2}[^\n]{0,24}적\s*립/.test(text.replace(/[ \t]+/g, ' ')) ? 10 : 0),
     };
     for (const k in FN_HINT) if (countKw(fn, FN_HINT[k])) s[k] += 6;
     // 지도 캡처에도 '버스','도착' 등이 섞이므로 km+지도 키워드가 강하면 자차 우선
@@ -680,7 +750,8 @@
   }
 
   const api = { analyzeText, classify, findDates, findRanges, findAmount, findRefs, refsMatch, findRoute, findKm,
-    findFuel, normPlace, samePlace, matchPlace, normRef, addDays, compact, airlineOf, findFlights };
+    findFuel, normPlace, samePlace, matchPlace, normRef, addDays, compact, airlineOf, findFlights,
+    routeFromLayout, placeOfToken, DEP_LABEL, ARR_LABEL };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else global.Extract = api;
 })(typeof window !== 'undefined' ? window : globalThis);

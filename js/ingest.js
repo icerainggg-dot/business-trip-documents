@@ -28,12 +28,48 @@
     return ocrInit;
   }
 
-  async function ocr(source, onProgress) {
+  // 인식 결과 전체(text + 단어 좌표 words)를 돌려준다. psm을 주면 그 배치 방식으로 읽고 끝나면 기본값(6)으로 되돌림
+  async function ocrData(source, onProgress, psm) {
     const w = await getOcr();
     ocrProgress = onProgress || (() => {});
-    const { data } = await w.recognize(source);
-    ocrProgress = () => {};
-    return data.text || '';
+    if (psm) await w.setParameters({ tessedit_pageseg_mode: psm });
+    try {
+      const { data } = await w.recognize(source);
+      return { text: data.text || '', words: data.words || [] };
+    } finally {
+      ocrProgress = () => {};
+      if (psm) await w.setParameters({ tessedit_pageseg_mode: '6' });
+    }
+  }
+  const ocr = async (source, onProgress) => (await ocrData(source, onProgress)).text;
+
+  /*
+   * 출발지·도착지 보완 (항공사·운송사별 화면 모양과 무관한 공통 처리)
+   * 글자만으로 구간을 못 찾은 교통 문서는 글자 '배치'로 찾는다: Extract.routeFromLayout
+   *  - words: 1차 인식 단어 좌표 / reread: 더 크게·흩어진 글자 모드로 다시 읽는 함수(이미지·스캔 PDF)
+   * 찾은 값은 '구간: 제주 → 청주' / '편명: LJ7489' 줄로 본문 앞에 붙여 이후 분석이 그대로 쓰게 한다
+   */
+  async function enrichTransport(text, words, reread) {
+    const X = global.Extract;
+    if (!X) return text;
+    const a = X.analyzeText(text);
+    const looksTransport = /^transport_/.test(a.docType) || (X.DEP_LABEL.test(text) && X.ARR_LABEL.test(text));
+    if (!looksTransport) return text;
+    const needRoute = () => !a.from || !a.to;
+    const head = [];
+    let r = needRoute() ? X.routeFromLayout(words) : null;
+    // 편명은 탑승확인서에서만 다시 찾는다 (편명이 원래 없는 지불영수증까지 재인식하지 않도록)
+    let flight = a.vehicleNo || a.docType !== 'transport_confirm' || a.mode !== 'air' ? '' : null;
+    if ((needRoute() && !r) || flight === null) {
+      const d = reread && await reread();
+      if (d) {
+        if (needRoute() && !r) r = X.routeFromLayout(d.words);
+        if (flight === null) flight = X.findFlights(d.text || '')[0] || null;
+      }
+    }
+    if (r && needRoute()) head.push(`구간: ${r.from} → ${r.to}`);
+    if (flight) head.push(`편명: ${flight}`);
+    return head.length ? head.join('\n') + '\n' + text : text;
   }
 
   // 작은 캡처는 확대해야 인식률이 올라감
@@ -71,14 +107,22 @@
     doc.thumb = doc.previewUrl;
     const img = await loadImage(doc.previewUrl);
     step('글자 인식 중');
-    const text = await ocr(toCanvas(img, 4000), p => step('글자 인식 중', p));
-    // 마일리지 적립내역의 회색 편명(OZ8199 등)은 원본 크기로는 거의 못 읽음 → 확대해서 한 번 더 인식
-    if (/마일리지|적립/.test(text) && global.Extract && !global.Extract.findFlights(text).length) {
-      step('글자 인식 중(확대)');
-      const big = await ocr(toCanvas(img, 4000, 1.6), p => step('글자 인식 중(확대)', p));
-      if (global.Extract.findFlights(big).length) return big;
+    const first = await ocrData(toCanvas(img, 4000), p => step('글자 인식 중', p));
+    const X = global.Extract;
+    if (!X) return first.text;
+    // 마일리지·포인트 적립내역의 회색 편명(OZ8199, LJ7484 등)은 원본 크기로는 거의 못 읽음 → 확대해서 한 번 더 인식
+    if (/마일리지|적립|포인트/.test(first.text) && !X.findFlights(first.text).length) {
+      for (const s of [1.6, 2]) {
+        step('글자 인식 중(확대)');
+        const big = await ocr(toCanvas(img, 4000, s), p => step('글자 인식 중(확대)', p));
+        if (X.findFlights(big).length) return big;
+      }
     }
-    return text;
+    // 탑승권 등: 큰 글씨로 띄엄띄엄 놓인 지명·편명은 기본 인식이 자주 깨뜨림 → 2배 확대 + 흩어진 글자 모드(PSM 11)로 재확인
+    return enrichTransport(first.text, first.words, () => {
+      step('글자 인식 중(구간 재확인)');
+      return ocrData(toCanvas(img, 4000, 2), p => step('글자 인식 중(구간 재확인)', p), '11');
+    });
   }
 
   async function readPdf(doc, buf, step) {
@@ -95,6 +139,14 @@
       step(`PDF ${i}/${n}쪽`);
       const page = await pdf.getPage(i);
       const tc = await page.getTextContent();
+      // 글자 좌표(위→아래 좌표계)를 OCR 단어와 같은 모양으로: 출발/도착 배치 판정에 사용
+      const ph = page.view[3] - page.view[1];
+      const words = tc.items.filter(it => it.str && it.str.trim() && it.transform).flatMap(it => {
+        const h = Math.abs(it.transform[3]) || it.height || 10, y1 = ph - it.transform[5], x0 = it.transform[4];
+        const parts = it.str.trim().split(/\s+/), cw = (it.width || h * it.str.length) / Math.max(1, it.str.length);
+        let x = x0;
+        return parts.map(p => { const b = { x0: x, y0: y1 - h, x1: x + p.length * cw, y1 }; x += (p.length + 1) * cw; return { text: p, bbox: b }; });
+      });
       let t = '', lastY = null;
       tc.items.forEach(it => {
         const y = it.transform ? it.transform[5] : null;
@@ -112,8 +164,18 @@
       doc.pages.push(c.toDataURL('image/jpeg', 0.88));
       if (t.replace(/\s/g, '').length < 30) { // 스캔 PDF
         step(`PDF ${i}/${n}쪽 글자 인식`);
-        t = await ocr(c, p => step(`PDF ${i}/${n}쪽 글자 인식`, p));
-      }
+        const d = await ocrData(c, p => step(`PDF ${i}/${n}쪽 글자 인식`, p));
+        t = await enrichTransport(d.text, d.words, () => {
+          step(`PDF ${i}/${n}쪽 구간 재확인`);
+          const big = page.getViewport({ scale: 3 });
+          const c2 = document.createElement('canvas');
+          c2.width = big.width; c2.height = big.height;
+          const g2 = c2.getContext('2d');
+          g2.fillStyle = '#fff'; g2.fillRect(0, 0, c2.width, c2.height);
+          return page.render({ canvasContext: g2, viewport: big }).promise
+            .then(() => ocrData(c2, p => step(`PDF ${i}/${n}쪽 구간 재확인`, p), '11'));
+        });
+      } else t = await enrichTransport(t, words, null);
       texts.push(t);
     }
     doc.thumb = doc.pages[0];
