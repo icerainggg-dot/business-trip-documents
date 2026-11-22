@@ -214,6 +214,7 @@
   // '예약일자'·'결제일시'·'Payment Date'의 '일자/일시/date'는 탑승일 근거가 아님
   const PURCHASE_DATE_LABEL = /(결제|발권|구매|승인|발행|예매|예약|거래|주문|입금|환불|취소|작성|등록|발급|시행|기준|조사|생성)일(자|시)?|(approval|payment|reservation|booking|transaction|purchase|order|issue|issuing)date/g;
   const isTravelCtx = c => TRAVEL_CTX.test(c.replace(PURCHASE_DATE_LABEL, ''));
+  const NONTRAVEL_CTX = /(유효|만료|소멸|expir|valid)/;
 
   function pickTravelDate(text, dates) {
     if (!dates.length) return { travelDate: '', payDate: '' };
@@ -231,6 +232,10 @@
       const nextRaw = le < 0 ? '' : text.slice(le + 1).split('\n')[0];
       const next = /\d/.test(nextRaw) ? '' : compact(nextRaw).slice(0, 24);
       let s = 0;
+      // '운임 유효기간: 2027년 11월 18일'·만료일·소멸일은 탑승일도 결제일도 아님 (같은 줄 앞쪽의 '여정정보'보다 우선)
+      if (NONTRAVEL_CTX.test(label.slice(-14))) return;
+      // 날짜 바로 뒤에 시각(초 없음)이 붙으면 탑승·출발 일시일 가능성이 높음 ('2026년 11월 18일(수) 16:45')
+      if (/^\s*(\([^)\n]{1,3}\))?\s*([01]?\d|2[0-3]):[0-5]\d(?!:\d)/.test(text.slice(d.idx + d.len, d.idx + d.len + 12))) s += 1;
       if (PURCHASE_CTX.test(label)) { s -= 4; if (!pay) pay = d.date; }
       else if (isTravelCtx(label)) s += 3;
       else if (next && PURCHASE_CTX.test(next)) { s -= 4; if (!pay) pay = d.date; }
@@ -242,6 +247,7 @@
       // 근거가 같으면 늦은 날짜 우선 (결제일은 보통 탑승일보다 앞섬)
       if (!best || s > best.s || (s === best.s && d.date > best.date)) best = { s, date: d.date };
     });
+    if (!best) return { travelDate: '', payDate: pay };
     return { travelDate: best.s > -2 ? best.date : '', payDate: pay || (best.s <= -2 ? best.date : '') };
   }
 
@@ -295,7 +301,8 @@
       const v = toNum(m[2].replace(/\./g, ','));
       if (v == null || v < 100 || v > 20000000) continue;
       const after = text.slice(m.index + m[0].length, m.index + m[0].length + 3);
-      if (/^\s*[:시분]/.test(after) || /^\s*(km|㎞)/i.test(after)) continue;
+      // 시각·거리·날짜('운임 유효기간: 2027년 11월')의 숫자는 금액이 아님
+      if (/^\s*[:시분년]/.test(after) || /^\s*(km|㎞)/i.test(after) || /^\s*[.\-\/]\s*\d{1,2}\b/.test(after)) continue;
       const p = prio(m[1]);
       if (!best || p > best.p || (p === best.p && v > best.v)) best = { p, v };
     }
@@ -353,11 +360,13 @@
   // ───────────────────────── 구간(출발→도착) ─────────────────────────
   // OCR은 괄호 속 공항코드를 자주 틀림(CJU→CIU, GMP→6MP) → 한 글자 차이까지는 공항코드로 인정
   const IATA_OCR = { 0: 'O', 1: 'I', 5: 'S', 6: 'G', 8: 'B' };
-  function fuzzyIata(tok) {
+  // exactOnly: 숫자↔글자 오인식(6MP→GMP)만 고치고, 한 글자 다른 코드(HIE→HIN)는 인정하지 않음
+  function fuzzyIata(tok, exactOnly) {
     if (!/^[A-Z0-9]{3}$/.test(tok)) return null; // 공항코드는 대문자 (영문 단어 'the' 등 제외)
     const up = tok.replace(/[01568]/g, c => IATA_OCR[c]);
     if (!/^[A-Z]{3}$/.test(up)) return null;
     if (IATA[up]) return IATA[up];
+    if (exactOnly) return null;
     const near = Object.keys(IATA).filter(k => [...k].filter((c, i) => c !== up[i]).length === 1);
     return near.length === 1 ? IATA[near[0]] : null;
   }
@@ -384,13 +393,15 @@
         continue;
       }
       const place = /[가-힣]/.test(tok) ? placeOfWord(tok) : tok.length === 3 ? fuzzyIata(tok) : PLACE_EN[tok.toUpperCase()] || null;
+      // 한 글자 다른 공항코드로만 맞춘 장소는 근거가 약함 (깨진 글자 'HIE'가 사천(HIN)이 되는 등)
+      const weak = !!place && tok.length === 3 && !/[가-힣]/.test(tok) && !fuzzyIata(tok, true);
       const prev = items[items.length - 1];
       if (prev && /^\s*[(\/]\s*$/.test(line.slice(prev.end, m.index))) {
-        if (!prev.place || (place && AIRPORT_NAMES.has(place) && !AIRPORT_NAMES.has(prev.place))) prev.place = place || prev.place;
+        if (!prev.place || (place && AIRPORT_NAMES.has(place) && !AIRPORT_NAMES.has(prev.place))) { prev.weak = prev.place ? prev.weak && weak : weak; prev.place = place || prev.place; }
         prev.end = m.index + tok.length;
         continue;
       }
-      items.push({ place, start: m.index, end: m.index + tok.length });
+      items.push({ place, weak, start: m.index, end: m.index + tok.length });
     }
     const out = [];
     for (const it of items) if (it.place && (!out.length || out[out.length - 1].place !== it.place)) out.push(it);
@@ -455,7 +466,7 @@
     const lines = text.split('\n');
     for (let i = 0; i < lines.length; i++) {
       const ps = placesInLine(lines[i]);
-      if (ps.length < 2) continue;
+      if (ps.length < 2 || ps[0].weak || ps[1].weak) continue;
       // '출발 (From) … 도착 (To)' 머리줄 바로 아래 줄의 지명 두 개 (탑승권 공통 배치)
       const head = [lines[i - 1], lines[i - 2]].some(l => l && DEP_LABEL.test(l) && ARR_LABEL.test(l) && placesInLine(l).length === 0);
       const near = head || [lines[i - 1], lines[i], lines[i + 1]].some(l => l && ROUTE_LABEL.test(l));
@@ -668,8 +679,8 @@
       mileage: (n => n >= 2 ? n * 4 : n * 2)(countKw(c, MILEAGE_KW)) + (countKw(fn, FN_MILEAGE) ? 10 : 0) +
         // '2026.10.23 OZ8199 RSUCJU +109' 같은 적립 행이 여러 줄이면 적립내역 화면
         ((text.match(/20\d{2}\s*[.\-\/]\s*\d{1,2}\s*[.\-\/]\s*\d{1,2}[^\n]*\+\s*\d[\d,]*\s*$/gm) || []).length >= 2 ? 6 : 0) +
-        // 진에어 나비포인트 내역: '2026.11.12(목) 적립 제주(CJU)-청주(CJJ) /LJ7484 10' 행 + '포인트' 열
-        // 항공사 포인트/마일리지 내역 표: '2026.11.12(목) 적립 제주(CJU)-청주(CJJ) /LJ7484 10' 같은 행 + '포인트/마일' 열
+        // 진에어 나비포인트 내역: '2026.10.05(월) 적립 김포(GMP)-제주(CJU) /LJ0301 10' 행 + '포인트' 열
+        // 항공사 포인트/마일리지 내역 표: '2026.10.05(월) 적립 김포(GMP)-제주(CJU) /LJ0301 10' 같은 행 + '포인트/마일' 열
         (/(포인트|마일)/.test(c) && /20\d{2}\s*[.\-\/]?\s*\d{1,2}\s*[.\-\/]?\s*\d{1,2}[^\n]{0,24}적\s*립/.test(text.replace(/[ \t]+/g, ' ')) ? 10 : 0),
     };
     for (const k in FN_HINT) if (countKw(fn, FN_HINT[k])) s[k] += 6;

@@ -26,6 +26,27 @@
       </form>
     </section>
 
+    <!-- AI 연결 (로컬 LLM) -->
+    <section class="card">
+      <details id="llm-box" class="llm-box">
+        <summary><h2><span class="step ai">AI</span>로컬 LLM 연결 <small id="llm-badge">사용 안 함</small></h2></summary>
+        <p class="hint">연결하면 서류마다 AI가 이미지와 글자를 직접 읽어 종류·실제 출발일·구간·편명·금액을 판독하고, 출발/경유/도착 구분과 점검 결과를 AI가 먼저 정리합니다. 빈 곳은 기존 규칙으로 채웁니다. 서류는 이 PC(또는 지정한 사내 서버)의 LLM으로만 보내집니다.</p>
+        <form id="llm" class="llm-form" autocomplete="off">
+          <label class="chk wide"><input type="checkbox" name="enabled"> 로컬 LLM 사용</label>
+          <label>서버 종류<select name="provider"><option value="ollama">Ollama</option><option value="openai">vLLM · OpenAI 호환 (LM Studio, llama.cpp 등)</option></select></label>
+          <label>서버 주소<input name="baseUrl" placeholder="http://localhost:11434"></label>
+          <label>모델<span class="row"><input name="model" list="llm-models" placeholder="예: gemma4:e4b"><button type="button" id="llm-refresh" title="서버에서 모델 목록 불러오기">목록</button></span><datalist id="llm-models"></datalist></label>
+          <label>API 키 <small>(vLLM --api-key 등, 없으면 비움)</small><input name="apiKey" type="password"></label>
+          <label>이미지 보내기<select name="vision"><option value="auto">자동 (모델이 이미지를 받으면)</option><option value="on">항상</option><option value="off">보내지 않음 (글자만)</option></select></label>
+          <label>컨텍스트 길이 <small>(Ollama num_ctx)</small><input name="numCtx" type="number" min="2048" step="1024"></label>
+          <label>응답 시간제한(초)<input name="timeoutSec" type="number" min="10" step="10"></label>
+          <label class="chk"><input type="checkbox" name="think"> 생각 모드 <small>(지원 모델만 · 3~4배 느림 · 끄면 바로 답함)</small></label>
+          <div class="wide llm-acts"><button type="button" id="llm-test">연결 테스트</button><span id="llm-status" class="hint"></span></div>
+        </form>
+        <p class="hint small">브라우저에서 바로 호출합니다. 이 페이지를 localhost가 아닌 주소(사내 서버 등)로 열면 LLM 서버에서 그 주소를 허용해야 합니다 — Ollama: 환경변수 <code>OLLAMA_ORIGINS</code>, vLLM: <code>--allowed-origins</code>.</p>
+      </details>
+    </section>
+
     <!-- 2. 파일 등록 -->
     <section class="card">
       <h2><span class="step">2</span>서류 등록</h2>
@@ -47,6 +68,7 @@
           <button id="btn-hwpx" class="primary" type="button">증빙서류 HWPX</button>
           <button id="btn-pdf" class="primary" type="button">증빙서류 PDF</button>
           <button id="btn-zip" type="button">파일 정리 ZIP</button>
+          <button id="btn-ai" type="button" hidden title="AI 판독이 안 된 서류를 읽고, 여정과 점검 결과를 AI로 다시 정리">AI로 다시 정리</button>
           <button id="btn-reset" class="ghost" type="button">전체 초기화</button>
         </div>
       </div>
@@ -70,6 +92,7 @@
 <script src="lib/tesseract/tesseract.min.js"></script>
 <script src="js/extract.js"></script>
 <script src="js/analyze.js"></script>
+<script src="js/llm.js"></script>
 <script src="js/ingest.js"></script>
 <script src="js/evidence.js"></script>
 <script src="js/app.js"></script>

@@ -123,7 +123,37 @@ details pre { max-height: 200px; overflow: auto; font-size: 11.5px; background: 
 .viewer pre { background: #fff; padding: 16px; border-radius: 6px; white-space: pre-wrap; }
 .viewer .close { position: fixed; top: 10px; right: 14px; font-size: 26px; background: #fff; border-radius: 50%; width: 40px; height: 40px; padding: 0; }
 
+/* AI(로컬 LLM) 연결 */
+.step.ai { width: auto; padding: 0 7px; border-radius: 12px; background: #5b3fc4; font-size: 11.5px; font-weight: 700; }
+.llm-box > summary { list-style: none; cursor: pointer; }
+.llm-box > summary::-webkit-details-marker { display: none; }
+.llm-box > summary h2 { margin: 0; }
+.llm-box > summary h2::after { content: '▾'; color: var(--muted); font-size: 13px; margin-left: auto; }
+.llm-box[open] > summary h2 { margin-bottom: 10px; }
+.llm-box[open] > summary h2::after { content: '▴'; }
+#llm-badge.on { color: #5b3fc4; font-weight: 600; }
+.llm-form { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 14px; margin: 8px 0; }
+.llm-form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.llm-form label small { font-size: 11.5px; }
+.llm-form .row { display: flex; gap: 6px; }
+.llm-form .row button { padding: 6px 10px; font-size: 13px; flex-shrink: 0; }
+.llm-form .wide { grid-column: 1 / -1; }
+.llm-form .chk { flex-direction: row; align-items: center; gap: 8px; color: var(--ink); font-size: 14px; }
+.llm-form .chk input { width: auto; }
+.llm-acts { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+#llm-status.ok { color: var(--ok); } #llm-status.err { color: var(--err); }
+.hint.small { font-size: 12px; margin: 6px 0 0; }
+.hint code { font-size: 11.5px; background: var(--info-soft); padding: 0 4px; border-radius: 4px; }
+.tag.ai { background: #efeafd; color: #5b3fc4; }
+.ai-line { margin: 10px 0 0; padding: 8px 12px; border-radius: 8px; background: #f4f0fe; color: #4a33a8; font-size: 13.5px; }
+.ai-line.run { background: var(--brand-soft); color: var(--brand); }
+.ai-line.err { background: var(--err-soft); color: var(--err); }
+.issues li.ai .area { color: #5b3fc4; font-weight: 600; }
+.leg-h .by-ai { font-size: 11px; color: #5b3fc4; margin-left: 6px; font-weight: 600; }
+.fields .from-ai input, .fields .from-ai select { border-color: #cbbdf5; background: #fbf9ff; }
+
 @media (max-width: 860px) {
+  .llm-form { grid-template-columns: 1fr 1fr; }
   .remarks { grid-template-columns: 1fr; }
   .cols { grid-template-columns: 1fr; }
   .issues li { grid-template-columns: auto 1fr; }
@@ -134,4 +164,5 @@ details pre { max-height: 200px; overflow: auto; font-size: 11.5px; background: 
   .doc { grid-template-columns: 72px 1fr; }
   .thumb { width: 72px; height: 96px; }
   .fields { grid-template-columns: 1fr; }
+  .llm-form { grid-template-columns: 1fr; }
 }

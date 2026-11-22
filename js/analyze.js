@@ -24,10 +24,17 @@
   const num = v => (v === '' || v == null || isNaN(+v)) ? null : +v;
   const routeTxt = o => (o.from || o.to) ? `${o.from || '?'}→${o.to || '?'}` : '';
 
-  function analyze(trip, docs) {
+  /*
+   * plan: 로컬 LLM의 여정 정리 결과(LLM.planTrip) — 있으면 우선 적용하고, 빈 곳만 규칙으로 채운다.
+   *   { legs:[{dir, confirmId, receiptIds, mileageId, reason}], lodgings:[{receiptId, confirmId}], period:{start,end}, issues:[{level,msg,ids}], model }
+   *   사용자가 문서 카드에서 직접 고른 구분(dir)은 LLM보다 우선
+   */
+  function analyze(trip, docs, plan) {
     trip = trip || {};
     const issues = [];
-    const add = (level, area, msg, ids) => issues.push({ level, area, msg, ids: ids || [] });
+    const add = (level, area, msg, ids, ai) => issues.push({ level, area, msg, ids: ids || [], ai: !!ai });
+    const P = plan && Array.isArray(plan.legs) ? plan : null;
+    const aiInfo = P ? { model: plan.model || '', used: true, dirRejected: false } : null;
 
     docs.filter(d => d.status === 'error').forEach(d => add('error', '파일', `${d.name}: 읽기 실패 – ${d.error || '알 수 없는 오류'}`, [d.id]));
     const ok = docs.filter(d => d.status === 'done');
@@ -71,12 +78,24 @@
       rUsed.set(r.id, (rUsed.get(r.id) || 0) + 1);
       linkWhy.set(c.id, why);
     };
+    // 0) LLM이 짝지은 영수증↔확인서 (같은 편 캡처 묶음은 대표 확인서로)
+    const repOf = id => { const g = groups.find(g => g.some(d => d.id === id)); return g ? C[groups.indexOf(g)] : null; };
+    const aiDir = new Map(), aiMileage = new Map(), aiUsedR = new Set();
+    if (P) P.legs.forEach(pl => {
+      const c = pl.confirmId ? repOf(pl.confirmId) : null;
+      const rs = (pl.receiptIds || []).map(id => R.find(r => r.id === id)).filter(Boolean);
+      if (c) rs.forEach(r => { if (!(link.get(c.id) || []).includes(r)) { doLink(c, r, 'AI 판단'); aiUsedR.add(r.id); } });
+      [c && c.id, ...rs.map(r => r.id)].filter(Boolean).forEach(id => {
+        aiDir.set(id, pl.dir);
+        if (pl.mileageId) aiMileage.set(id, pl.mileageId);
+      });
+    });
     const sameMode = (a, b) => !a.f.mode || !b.f.mode || a.f.mode === 'etc' || b.f.mode === 'etc' || a.f.mode === b.f.mode;
     const free = r => !rUsed.has(r.id);
     const unlinked = () => C.filter(c => !link.has(c.id));
 
     // 1) 예약번호 일치 (왕복 영수증 1장 ↔ 확인서 여러 장 허용)
-    C.forEach(c => R.forEach(r => { if (X.refsMatch(refsOf(c), refsOf(r))) doLink(c, r, '예약번호'); }));
+    unlinked().forEach(c => R.filter(r => !aiUsedR.has(r.id)).forEach(r => { if (X.refsMatch(refsOf(c), refsOf(r))) doLink(c, r, '예약번호'); }));
     // 2) 같은 교통수단 + 같은 날짜 + 구간 일치
     unlinked().forEach(c => {
       const r = R.find(r => free(r) && sameMode(c, r) && r.f.date && r.f.date === c.f.date &&
@@ -120,6 +139,8 @@
         mode: pick('mode') || 'etc', date: pick('date'), time: pick('time'), airline: pick('airline'),
         from: pick('from'), to: pick('to'), vehicleNo: pick('vehicleNo'),
         dirManual: (c && c.f.dir !== 'auto' && c.f.dir) || (rs.find(r => r.f.dir && r.f.dir !== 'auto') || {}).f?.dir || '',
+        dirAI: (c && aiDir.get(c.id)) || rs.map(r => aiDir.get(r.id)).find(Boolean) || '',
+        mileageAI: (c && aiMileage.get(c.id)) || rs.map(r => aiMileage.get(r.id)).find(Boolean) || '',
         checks: [],
       };
     }
@@ -127,15 +148,21 @@
     // ───────── 숙박 ─────────
     const LR = of('lodging_receipt'), LC = of('lodging_confirm');
     const lodgings = [];
-    const lrUsed = new Set();
-    LC.forEach(c => {
+    const lrUsed = new Set(), lcUsed = new Set();
+    if (P) (P.lodgings || []).forEach(p => {
+      const c = LC.find(d => d.id === p.confirmId), r = LR.find(d => d.id === p.receiptId);
+      if (!c || !r || lcUsed.has(c.id) || lrUsed.has(r.id)) return;
+      lcUsed.add(c.id); lrUsed.add(r.id);
+      lodgings.push({ id: c.id, confirm: c, receipt: r, why: 'AI 판단' });
+    });
+    LC.filter(c => !lcUsed.has(c.id)).forEach(c => {
       let r = LR.find(r => !lrUsed.has(r.id) && X.refsMatch(refsOf(c), refsOf(r)));
       let why = '예약번호';
       if (!r) { r = LR.find(r => !lrUsed.has(r.id) && r.f.checkin && r.f.checkin === c.f.checkin); why = '체크인 날짜'; }
       if (!r) { r = LR.find(r => !lrUsed.has(r.id) && num(r.f.amount) && num(r.f.amount) === num(c.f.amount)); why = '금액'; }
       if (!r) {
         const rest = LR.filter(r => !lrUsed.has(r.id));
-        if (rest.length === 1 && LC.length === LR.length) { r = rest[0]; why = '추정'; }
+        if (rest.length === 1 && LC.filter(x => !lcUsed.has(x.id)).length === 1) { r = rest[0]; why = '추정'; }
       }
       if (r) lrUsed.add(r.id);
       lodgings.push({ id: c.id, confirm: c, receipt: r || null, why: r ? why : null });
@@ -169,6 +196,11 @@
       periodSrc = legDates.length || lodgings.length ? '증빙 날짜로 추정' : (off ? '공문 기간' : '');
       if (start && end && end < start) end = start;
     }
+    // LLM이 정한 출장기간: 교통·숙박 날짜를 모두 포함할 때만 사용
+    if (P && !trip.start && !trip.end && P.period && P.period.start && P.period.end) {
+      const ds = legDates.concat(lodgings.flatMap(L => [L.checkin, L.checkout]).filter(Boolean));
+      if (ds.every(d => d >= P.period.start && d <= P.period.end)) { start = P.period.start; end = P.period.end; periodSrc = 'AI 판단'; }
+    }
     const days = start && end ? diffDays(start, end) + 1 : null;
 
     // ───────── 출발 / 경유 / 도착 분류 (경유: 출장 중간의 이동, 여러 교통편 가능) ─────────
@@ -184,8 +216,27 @@
     const backDay = lastCheckout && (!end || lastCheckout <= end) ? (end && end > lastCheckout ? end : lastCheckout) : end;
     let dirGuessWeak = false;
 
-    const auto = legs.filter(l => !l.dirManual);
+    // LLM 구분: 날짜·시각 순서가 출발 → 경유 → 도착과 맞을 때만 쓴다
+    const RANK = { out: 0, local: 1, back: 2 };
+    const aiLegs = sortLegs(legs.filter(l => !l.dirManual && l.dirAI));
+    const aiOk = aiLegs.every((l, i) => i === 0 || !l.date || !aiLegs[i - 1].date || RANK[aiLegs[i - 1].dirAI] <= RANK[l.dirAI] ||
+      (l.date === aiLegs[i - 1].date && (!l.time || !aiLegs[i - 1].time)));
+    if (aiLegs.length && !aiOk) {
+      aiInfo.dirRejected = true;
+      add('info', '교통', 'AI가 정한 출발/경유/도착 구분이 탑승일 순서와 맞지 않아 규칙으로 다시 정리했습니다. 문서 카드의 구분을 확인하세요.', aiLegs.map(l => l.id));
+    }
     legs.filter(l => l.dirManual).forEach(l => { l.dir = l.dirManual; });
+    if (aiOk) aiLegs.forEach(l => { l.dir = l.dirAI; l.dirByAI = true; });
+    // LLM 구분 보정: 근무지(첫 구간 출발지 = 마지막 구간 도착지)에서 떠나는 첫 구간은 출발, 근무지로 돌아오는 마지막 구간은 도착
+    if (aiOk && aiLegs.length && legs.length >= 2) {
+      const all = sortLegs(legs.slice()), first = all[0], last = all[all.length - 1];
+      const home = trip.home || (first.from && last.to && X.samePlace(first.from, last.to) ? first.from : '');
+      const fixed = [];
+      if (home && last.dirByAI && last.dir !== 'back' && last.to && X.samePlace(last.to, home)) { last.dir = 'back'; fixed.push(last); }
+      if (home && first.dirByAI && first.dir !== 'out' && first.from && X.samePlace(first.from, home)) { first.dir = 'out'; fixed.push(first); }
+      if (fixed.length) add('info', '교통', `근무지(${home})로 돌아오는 마지막 구간은 도착, 떠나는 첫 구간은 출발로 보정했습니다 (AI 구분과 다름).`, fixed.map(l => l.id));
+    }
+    const auto = legs.filter(l => !l.dirManual && !l.dirByAI);
     if (outDay && backDay && outDay !== backDay) {
       auto.forEach(l => {
         if (!l.date) { l.dir = 'local'; return; }
@@ -253,7 +304,9 @@
       l.mileage = mileageDocs.find(m => fno && flightsOf(m).includes(fno)) ||
         mileageDocs.find(m => !flightsOf(m).length && airlineOk(m) && l.date && earnOf(m).includes(l.date)) ||
         mileageDocs.find(m => !flightsOf(m).length && airlineOk(m) && l.date && earnOf(m).some(e => near(l.date, e))) || null;
-      if (l.mileage && !earnOf(l.mileage).includes(l.date) && !flightsOf(l.mileage).includes(fno))
+      const mAI = l.mileageAI && mileageDocs.find(m => m.id === l.mileageAI);
+      if (mAI) l.mileage = mAI;
+      if (l.mileage && !mAI && !earnOf(l.mileage).includes(l.date) && !flightsOf(l.mileage).includes(fno))
         l.mileageNote = `적립일 ${earnOf(l.mileage).find(e => near(l.date, e))}`;
       if (l.mileage) usedMileage.add(l.mileage.id);
     });
@@ -321,6 +374,18 @@
       }
     };
     chainCheck(out, '출발'); chainCheck(back, '도착');
+    // 전체 여정 연결: 출발 마지막 → 경유 → 도착 첫 구간 사이에서 도착지와 다음 출발지가 다르면 그 사이 이동 증빙이 빠진 것
+    // (같은 내용의 AI 점검 의견이 있으면 중복해서 넣지 않음)
+    {
+      const chain = [out[out.length - 1], ...local, back[0]].filter(Boolean);
+      const aiMsgs = P ? (P.issues || []).map(i => X.compact(i.msg)) : [];
+      for (let i = 0; i + 1 < chain.length; i++) {
+        const a = chain[i], b = chain[i + 1];
+        if (!a.to || !b.from || X.samePlace(a.to, b.from)) continue;
+        if (aiMsgs.some(m => m.includes(X.compact(a.to)) && m.includes(X.compact(b.from)))) continue;
+        add('warn', '교통', `구간이 이어지지 않습니다: ${a.label}(${fmtD(a.date)}) ${a.to} 도착 후 ${b.label}(${fmtD(b.date)}) ${b.from} 출발 — 그 사이 이동(${a.to}→${b.from}) 증빙이 빠졌는지 확인하세요. 자차·대중교통이면 해당 증빙을 추가하세요.`, [a.id, b.id]);
+      }
+    }
     if (trip.home) {
       if (out[0] && out[0].from && !X.samePlace(out[0].from, trip.home))
         add('info', '교통', `출발 첫 구간의 출발지(${out[0].from})가 근무지(${trip.home})와 다릅니다. 앞 구간 교통 증빙이 빠졌는지 확인하세요.`, [out[0].id]);
@@ -340,6 +405,8 @@
         const a = resvOf(L.receipt), b = resvOf(L.confirm);
         if (a.length && b.length) {
           if (X.refsMatch(a, b)) L.checks.push({ ok: true, t: '예약번호 일치' });
+          // AI가 숙소명·날짜 등으로 짝지은 경우: 카드전표의 결제 주문번호와 숙소 예약번호처럼 번호 체계가 다를 수 있음
+          else if (L.why === 'AI 판단') { L.checks.push({ ok: null, t: '예약번호 다름(번호 체계 다를 수 있음)' }); add('info', '숙박', `${nm}: 영수증 번호(${a.join('/')})와 확인서 예약번호(${b.join('/')})가 다릅니다. 결제 주문번호와 숙소 예약번호처럼 번호 체계가 다른 것인지 확인하세요.`, ids); }
           else { L.checks.push({ ok: false, t: '예약번호 불일치' }); add('error', '숙박', `${nm}: 예약번호 불일치 (영수증 ${a.join('/')} ↔ 확인서 ${b.join('/')})`, ids); }
         }
         const rc = L.receipt.f, cc = L.confirm.f;
@@ -422,14 +489,17 @@
     const lodgingSum = lodgings.reduce((s, L) => s + (L.amount || 0), 0);
     const carSum = car ? (car.cost || 0) + (car.toll || 0) : 0;
 
+    // LLM 점검 의견 (같은 등급 안에서 규칙 점검보다 앞에)
+    if (P) (P.issues || []).forEach(i => add(i.level, 'AI 점검', i.msg, i.ids, true));
     const order = { error: 0, warn: 1, info: 2 };
-    issues.sort((a, b) => order[a.level] - order[b.level]);
+    issues.sort((a, b) => order[a.level] - order[b.level] || (b.ai - a.ai));
 
     return {
       period: { start, end, days, src: periodSrc },
       out, local, back, legs, lodgings, car, officials, mileageDocs,
       others: of('other'),
       issues,
+      ai: aiInfo,
       totals: { transport: transportSum, lodging: lodgingSum, car: carSum, all: transportSum + lodgingSum + carSum },
     };
   }

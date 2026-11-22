@@ -15,6 +15,119 @@
     return { remarkOut: f.remarkOut.value.trim(), remarkBack: f.remarkBack.value.trim() };
   }
 
+  // ───────────────────────── AI(로컬 LLM) 연결 설정 ─────────────────────────
+  // 설정은 이 브라우저에만 저장 (서버 종류·주소·모델 등을 그때그때 바꿔 쓸 수 있음)
+  const LLM_KEY = 'btd.llm';
+  const llmForm = $('#llm');
+  let llmS = LLM.settingsOf((() => { try { return JSON.parse(localStorage.getItem(LLM_KEY) || '{}'); } catch (e) { return {}; } })());
+  const llmOn = () => !!(llmS.enabled && llmS.model);
+  const ai = { plan: null, running: false, error: '', seq: 0, stale: false };
+  function fillLlmForm() {
+    const f = llmForm.elements;
+    f.enabled.checked = !!llmS.enabled; f.provider.value = llmS.provider; f.baseUrl.value = llmS.baseUrl;
+    f.baseUrl.placeholder = LLM.PROVIDERS[llmS.provider].baseUrl;
+    f.model.value = llmS.model; f.apiKey.value = llmS.apiKey; f.vision.value = llmS.vision;
+    f.numCtx.value = llmS.numCtx; f.timeoutSec.value = llmS.timeoutSec; f.think.checked = !!llmS.think;
+    f.numCtx.disabled = llmS.provider !== 'ollama';
+    updateLlmBadge();
+  }
+  function updateLlmBadge() {
+    const b = $('#llm-badge');
+    b.textContent = llmOn() ? `사용 중 · ${LLM.PROVIDERS[llmS.provider].label.split(' ')[0]} · ${llmS.model}` : llmS.enabled ? '모델을 고르세요' : '사용 안 함';
+    b.classList.toggle('on', llmOn());
+    $('#btn-ai').hidden = !llmOn();
+  }
+  function readLlmForm() {
+    const f = llmForm.elements;
+    const prov = f.provider.value;
+    if (prov !== llmS.provider) { f.baseUrl.value = ''; f.model.value = ''; $('#llm-models').innerHTML = ''; }
+    llmS = LLM.settingsOf({
+      enabled: f.enabled.checked, provider: prov, baseUrl: f.baseUrl.value.trim(), model: f.model.value.trim(),
+      apiKey: f.apiKey.value.trim(), vision: f.vision.value, think: f.think.checked,
+      numCtx: +f.numCtx.value || LLM.DEFAULTS.numCtx, timeoutSec: +f.timeoutSec.value || LLM.DEFAULTS.timeoutSec,
+    });
+    try { localStorage.setItem(LLM_KEY, JSON.stringify(llmS)); } catch (e) { /* 저장 불가(사생활 보호 모드 등): 이번 세션만 사용 */ }
+    fillLlmForm();
+  }
+  function llmStatus(msg, cls) { const el = $('#llm-status'); el.textContent = msg; el.className = 'hint' + (cls ? ' ' + cls : ''); }
+  async function refreshModels(quiet) {
+    try {
+      const ms = await LLM.listModels(llmS);
+      $('#llm-models').innerHTML = ms.map(m => `<option value="${esc(m)}">`).join('');
+      if (!quiet) llmStatus(`모델 ${ms.length}개: ${ms.join(', ') || '(없음)'}`, ms.length ? 'ok' : 'err');
+      return ms;
+    } catch (e) { if (!quiet) llmStatus(e.message, 'err'); return []; }
+  }
+  llmForm.addEventListener('change', () => {
+    const wasOn = llmOn();
+    readLlmForm();
+    if (!wasOn && llmOn() && state.docs.some(d => d.status === 'done')) llmStatus('[AI로 다시 정리]를 누르면 이미 읽은 서류도 AI로 판독합니다.');
+    scheduleAnalyze(0);
+  });
+  $('#llm-refresh').addEventListener('click', () => refreshModels(false));
+  $('#llm-test').addEventListener('click', async e => {
+    const btn = e.currentTarget;
+    btn.disabled = true; llmStatus('연결 확인 중… (모델을 처음 불러오면 오래 걸릴 수 있습니다)');
+    try {
+      const r = await LLM.testConnection(llmS);
+      $('#llm-models').innerHTML = r.models.map(m => `<option value="${esc(m)}">`).join('');
+      llmStatus(r.msg, r.ok ? 'ok' : 'err');
+    } catch (err) { llmStatus(err.message, 'err'); } finally { btn.disabled = false; }
+  });
+
+  // 서류 이미지 → LLM에 보낼 축소 JPEG (PDF는 앞 2쪽)
+  async function docImages(doc) {
+    const srcs = doc.pages && doc.pages.length ? doc.pages.slice(0, 2) : doc.previewUrl ? [doc.previewUrl] : [];
+    const out = [];
+    for (const src of srcs) {
+      try {
+        const img = await Ingest.loadImage(src);
+        const w = img.naturalWidth, h = img.naturalHeight, k = Math.min(1, llmS.maxImageSide / Math.max(w, h));
+        const c = document.createElement('canvas');
+        c.width = Math.round(w * k); c.height = Math.round(h * k);
+        const g = c.getContext('2d');
+        g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+        g.drawImage(img, 0, 0, c.width, c.height);
+        out.push(c.toDataURL('image/jpeg', 0.85));
+      } catch (e) { /* 이미지 없이 글자만 보냄 */ }
+    }
+    return out;
+  }
+  // 서류 1건 AI 판독 → 규칙 인식값과 합쳐 문서 필드에 반영 (사용자가 고친 서류는 건드리지 않음)
+  async function aiReadDoc(doc) {
+    if (doc.userTouched || !doc.auto) return;
+    doc.aiBusy = true; updateStatus(doc);
+    try {
+      const rule = fieldsFromAuto(doc.auto);
+      const r = await LLM.extractDoc(llmS, Object.assign({}, doc, { f: rule }), await docImages(doc));
+      if (doc.userTouched) return;
+      const m = LLM.mergeDoc(rule, r, doc.auto);
+      doc.ai = r; doc.aiSrc = m.src; doc.aiError = '';
+      doc.f = Object.assign(m.f, { dir: doc.f.dir || 'auto' });
+      doc.lowConfidence = false;
+    } catch (e) {
+      console.error(e);
+      doc.aiError = e.message || String(e);
+    } finally { doc.aiBusy = false; }
+  }
+  // 전체 서류 → AI 여정 정리 (늦게 끝난 이전 요청 결과는 버림)
+  async function runPlan() {
+    const docs = state.docs.filter(d => d.status === 'done');
+    if (!llmOn() || !docs.length) return;
+    const my = ++ai.seq;
+    ai.running = true; ai.error = '';
+    runAnalyze();
+    try {
+      const p = await LLM.planTrip(llmS, trip(), docs);
+      if (my === ai.seq) { ai.plan = p; ai.stale = false; }
+    } catch (e) {
+      console.error(e);
+      if (my === ai.seq) ai.error = e.message || String(e);
+    } finally {
+      if (my === ai.seq) { ai.running = false; runAnalyze(); }
+    }
+  }
+
   // ───────────────────────── 파일 등록 ─────────────────────────
   const drop = $('#drop'), fileInput = $('#file');
   // file:// 로 열면 OCR 워커를 불러올 수 없음 → start.bat(로컬 서버)로 열도록 안내
@@ -53,6 +166,7 @@
   }
   function removeDoc(doc) {
     state.docs = state.docs.filter(d => d !== doc);
+    if (ai.plan) ai.stale = true;
     const card = docsBox.querySelector(`[data-id="${doc.id}"]`);
     if (card) card.remove();
     if (doc.previewUrl) URL.revokeObjectURL(doc.previewUrl);
@@ -102,6 +216,7 @@
         doc.auto = Extract.analyzeText(doc.text, { filename: doc.name, ext: doc.ext, refYear: yearHint() });
         doc.f = fieldsFromAuto(doc.auto);
         doc.lowConfidence = doc.auto.confidence < 2;
+        if (llmOn()) { step('AI 판독 중'); await aiReadDoc(doc); }
         doc.status = 'done';
       } catch (e) {
         console.error(e);
@@ -116,6 +231,7 @@
     }
     busy = false;
     updateProgress();
+    if (llmOn() && state.docs.some(d => d.status === 'done')) runPlan();
   }
   function yearHint() { return undefined; }
   function fieldsFromAuto(a) {
@@ -175,8 +291,14 @@
     const label = { pdf: 'PDF', hwpx: 'HWPX', hwp: 'HWP' }[doc.ext] || (doc.ext || '').toUpperCase();
     return `<div class="ph">${esc(label || '파일')}</div>`;
   }
+  function aiTag(doc) {
+    if (doc.aiBusy) return '<span class="tag run">AI 판독 중</span>';
+    if (doc.aiError) return `<span class="tag err" title="${esc(doc.aiError)}">AI 판독 실패 – 규칙 인식값 사용</span>`;
+    if (doc.ai) return `<span class="tag ai" title="${esc(doc.ai.note || '')}">AI 판독${doc.ai.vision ? '(이미지)' : ''}</span>`;
+    return '';
+  }
   function statusHtml(doc) {
-    if (doc.status === 'done') return doc.lowConfidence ? '<span class="tag warn">분류 확인 필요</span>' : '<span class="tag ok">인식 완료</span>';
+    if (doc.status === 'done') return aiTag(doc) + (doc.ai && !doc.aiError ? '' : doc.lowConfidence ? '<span class="tag warn">분류 확인 필요</span>' : '<span class="tag ok">인식 완료</span>');
     if (doc.status === 'error') return `<span class="tag err">오류: ${esc(doc.error)}</span>`;
     return `<span class="tag run">${esc(doc.step || '대기')}${doc.pct ? ' ' + Math.round(doc.pct * 100) + '%' : ''}</span>`;
   }
@@ -190,7 +312,7 @@
     }
     const ready = doc.status === 'done';
     const typeSel = Object.keys(TYPE_LABEL).map(k => `<option value="${k}"${doc.f.type === k ? ' selected' : ''}>${TYPE_LABEL[k]}</option>`).join('');
-    const fields = ready ? (FIELDS_BY_TYPE[doc.f.type] || []).map(k => fieldHtml(k, doc.f[k], doc.f.type)).join('') : '';
+    const fields = ready ? (FIELDS_BY_TYPE[doc.f.type] || []).map(k => fieldHtml(k, doc.f[k], doc.f.type, doc.aiSrc && doc.aiSrc[k] && !doc.userTouched)).join('') : '';
     el.innerHTML = `
       <div class="thumb" data-act="view">${thumbHtml(doc)}</div>
       <div class="meta">
@@ -208,12 +330,13 @@
       </div>`;
   }
   const LABEL_BY_TYPE = { mileage: { date: '적립일' } };
-  function fieldHtml(k, v, type) {
+  function fieldHtml(k, v, type, byAI) {
     const d = Object.assign({}, F[k], LABEL_BY_TYPE[type] && LABEL_BY_TYPE[type][k] ? { label: LABEL_BY_TYPE[type][k] } : {});
     v = v == null ? '' : v;
+    const lab = byAI ? '<label class="from-ai" title="AI 판독값">' : '<label>';
     if (d.type === 'select')
-      return `<label>${d.label}<select data-k="${k}">${d.opts.map(([o, l]) => `<option value="${o}"${String(v) === o ? ' selected' : ''}>${l}</option>`).join('')}</select></label>`;
-    return `<label>${d.label}<input data-k="${k}" type="${d.type}"${d.type === 'number' ? ' step="any"' : ''} value="${esc(v)}" placeholder="${esc(d.ph || '')}"></label>`;
+      return `${lab}${d.label}<select data-k="${k}">${d.opts.map(([o, l]) => `<option value="${o}"${String(v) === o ? ' selected' : ''}>${l}</option>`).join('')}</select></label>`;
+    return `${lab}${d.label}<input data-k="${k}" type="${d.type}"${d.type === 'number' ? ' step="any"' : ''} value="${esc(v)}" placeholder="${esc(d.ph || '')}"></label>`;
   }
   function updateStatus(doc) {
     const s = docsBox.querySelector(`[data-id="${doc.id}"] .status`);
@@ -228,6 +351,7 @@
     const doc = docById(card.dataset.id);
     doc.f[k] = e.target.value;
     doc.userTouched = true;
+    if (ai.plan) ai.stale = true;
     if (k === 'type') { doc.lowConfidence = false; renderDocCard(doc); }
     scheduleAnalyze();
   });
@@ -264,13 +388,22 @@
     const finished = state.docs.filter(d => d.status === 'done' || d.status === 'error');
     $('#result').hidden = !finished.length;
     if (!finished.length) return;
-    state.result = analyze(trip(), finished);
+    state.result = analyze(trip(), finished, llmOn() ? ai.plan : null);
     renderResult(state.result);
   }
 
   const mileageInfo = m => [m.f.date ? `적립일 ${m.f.date.replace(/-/g, '.')}` : '적립일 미상', m.f.points || ''].filter(Boolean).join(' · ');
   function docLink(d) { return d ? `<a href="#" data-goto="${d.id}" title="${esc(d.name)}">${esc(d.name)}</a>` : ''; }
 
+  function aiLineHtml(r) {
+    if (!llmOn()) return '';
+    const failed = state.docs.filter(d => d.aiError).length;
+    const failTxt = failed ? ` · AI 판독 실패 ${failed}건은 규칙 인식값 사용` : '';
+    if (ai.running) return `<p class="ai-line run">AI(${esc(llmS.model)})가 여정과 점검 결과를 정리하는 중입니다… 지금 보이는 것은 규칙으로 정리한 결과입니다.${failTxt}</p>`;
+    if (ai.error) return `<p class="ai-line err">AI 여정 정리 실패: ${esc(ai.error)} — 규칙으로만 정리했습니다. [AI로 다시 정리]로 재시도하세요.${failTxt}</p>`;
+    if (r.ai) return `<p class="ai-line">AI(${esc(r.ai.model)}) 판단을 우선해 여정과 점검 결과를 정리했고, 빈 곳은 규칙으로 보완했습니다.${r.ai.dirRejected ? ' (AI 구분이 날짜 순서와 맞지 않아 구분은 규칙으로 정리)' : ''}${ai.stale ? ' 서류가 바뀌었습니다 — [AI로 다시 정리]를 누르면 반영됩니다.' : ''}${failTxt}</p>`;
+    return '';
+  }
   function renderResult(r) {
     const pending = state.docs.filter(d => d.status === 'queued' || d.status === 'reading').length;
     const nE = r.issues.filter(i => i.level === 'error').length, nW = r.issues.filter(i => i.level === 'warn').length;
@@ -282,17 +415,18 @@
         ${r.car ? `<div><b>${r.car.km ? r.car.km.toLocaleString('ko-KR') + 'km' : '거리 미상'}</b><span>자차 이동거리</span></div>` : ''}
         <div class="${nE ? 'bad' : nW ? 'mid' : 'good'}"><b>${nE ? `보완 ${nE}건` : nW ? `확인 ${nW}건` : '이상 없음'}</b><span>점검 결과</span></div>
       </div>
-      ${pending ? `<p class="hint">아직 ${pending}개 파일을 처리 중입니다. 완료되면 결과가 갱신됩니다.</p>` : ''}`;
+      ${pending ? `<p class="hint">아직 ${pending}개 파일을 처리 중입니다. 완료되면 결과가 갱신됩니다.</p>` : ''}
+      ${aiLineHtml(r)}`;
 
     const LV = { error: ['err', '보완 필요'], warn: ['warn', '확인 필요'], info: ['info', '참고'] };
     $('#issues').innerHTML = r.issues.length ? `<h3>보완·확인 사항</h3><ul class="issues">${r.issues.map(i =>
-      `<li class="${LV[i.level][0]}"><span class="lv">${LV[i.level][1]}</span><span class="area">${esc(i.area)}</span><span class="msg">${esc(i.msg)}</span>${i.ids.length ? `<a href="#" data-goto="${i.ids[0]}">문서 보기</a>` : ''}</li>`).join('')}</ul>`
+      `<li class="${LV[i.level][0]}${i.ai ? ' ai' : ''}"><span class="lv">${LV[i.level][1]}</span><span class="area">${esc(i.area)}</span><span class="msg">${esc(i.msg)}</span>${i.ids.length ? `<a href="#" data-goto="${i.ids[0]}">문서 보기</a>` : ''}</li>`).join('')}</ul>`
       : '<p class="allgood">빠진 서류나 불일치 항목이 없습니다.</p>';
 
     const chk = c => `<li class="${c.ok === true ? 'ok' : c.ok === false ? 'bad' : 'na'}">${esc(c.t)}</li>`;
     const legCard = l => `
       <div class="leg">
-        <div class="leg-h"><b>${esc(l.label)}</b><span class="mode m-${l.mode}">${MODE_LABEL[l.mode] || '교통'}</span></div>
+        <div class="leg-h"><b>${esc(l.label)}${l.dirByAI ? '<span class="by-ai" title="AI가 구분">AI</span>' : ''}</b><span class="mode m-${l.mode}">${MODE_LABEL[l.mode] || '교통'}</span></div>
         <div class="leg-r">${esc(l.from || '?')} <i>→</i> ${esc(l.to || '?')}</div>
         <div class="leg-d">${esc(l.date || '날짜 미상')} ${esc(l.time || '')} ${esc(l.vehicleNo || '')}</div>
         <div class="pair">
@@ -393,10 +527,26 @@
     download(blob, `출장증빙파일_${(state.result.period.start || '').replace(/-/g, '')}.zip`);
   });
 
+  $('#btn-ai').addEventListener('click', async e => {
+    if (busy) { alert('아직 처리 중인 파일이 있습니다. 완료 후 다시 눌러주세요.'); return; }
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      for (const d of state.docs.filter(d => d.status === 'done' && (!d.ai || d.aiError) && !d.userTouched)) {
+        await aiReadDoc(d);
+        if (state.docs.includes(d)) renderDocCard(d);
+      }
+      await runPlan();
+    } finally { btn.disabled = false; }
+  });
+  fillLlmForm();
+  if (llmS.enabled) { $('#llm-box').open = !llmS.model; refreshModels(true); }
+
   $('#btn-reset').addEventListener('click', () => {
     if (!confirm('등록한 서류를 모두 지울까요?')) return;
     state.docs.forEach(d => d.previewUrl && URL.revokeObjectURL(d.previewUrl));
     state.docs = []; queue.length = 0; state.result = null;
+    ai.plan = null; ai.error = ''; ai.stale = false; ai.seq++; ai.running = false;
     docsBox.innerHTML = '';
     $('#docs-sec').hidden = true; $('#result').hidden = true; $('#dup-note').hidden = true;
     updateProgress();
