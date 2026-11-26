@@ -9,3 +9,4 @@
 *.pfb   binary
 *.ttf   binary
 *.png   binary
+*.onnx  binary

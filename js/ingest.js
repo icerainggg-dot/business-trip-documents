@@ -1,6 +1,6 @@
 /*
  * 파일 → 텍스트/미리보기 이미지
- *  - 이미지: Tesseract OCR (kor+eng, 로컬 lib)
+ *  - 이미지: 글자 인식(OCR) — Tesseract(kor+eng, 기본) 또는 PP-OCRv5 한국어(js/ocr-paddle.js) 중 사용자가 고른 엔진
  *  - PDF: pdf.js 텍스트 추출, 텍스트가 없으면(스캔본) 페이지 렌더링 후 OCR
  *  - HWPX: zip 내부 Preview/PrvText.txt 또는 Contents/section*.xml
  *  - HWP: 텍스트 추출 불가 (파일명으로만 분류)
@@ -28,8 +28,25 @@
     return ocrInit;
   }
 
+  // 글자 인식 엔진: 'tesseract' | 'paddle' (화면에서 고름). PP-OCRv5가 실패하면(모델 없음 등) 그 서류는 Tesseract로 읽고 이유를 남김
+  const ENGINE_LABEL = { tesseract: 'Tesseract', paddle: 'PP-OCRv5 한국어' };
+  let engine = 'tesseract';
+  function setEngine(e) { engine = ENGINE_LABEL[e] ? e : 'tesseract'; }
+
   // 인식 결과 전체(text + 단어 좌표 words)를 돌려준다. psm을 주면 그 배치 방식으로 읽고 끝나면 기본값(6)으로 되돌림
-  async function ocrData(source, onProgress, psm) {
+  // doc을 주면 실제로 쓴 엔진을 doc.ocrEngine 에, PP-OCRv5 실패 이유를 doc.ocrFallback 에 적는다
+  async function ocrData(source, onProgress, psm, doc) {
+    if (engine === 'paddle' && global.PaddleOcr && !(doc && doc.ocrFallback)) {
+      try {
+        const r = await global.PaddleOcr.recognize(source, onProgress);
+        if (doc) doc.ocrEngine = 'paddle';
+        return r;
+      } catch (e) {
+        console.error(e);
+        if (doc) doc.ocrFallback = e.message || String(e);
+      }
+    }
+    if (doc) doc.ocrEngine = 'tesseract';
     const w = await getOcr();
     ocrProgress = onProgress || (() => {});
     if (psm) await w.setParameters({ tessedit_pageseg_mode: psm });
@@ -41,7 +58,7 @@
       if (psm) await w.setParameters({ tessedit_pageseg_mode: '6' });
     }
   }
-  const ocr = async (source, onProgress) => (await ocrData(source, onProgress)).text;
+  const ocr = async (source, onProgress, doc) => (await ocrData(source, onProgress, undefined, doc)).text;
 
   /*
    * 출발지·도착지 보완 (항공사·운송사별 화면 모양과 무관한 공통 처리)
@@ -107,21 +124,21 @@
     doc.thumb = doc.previewUrl;
     const img = await loadImage(doc.previewUrl);
     step('글자 인식 중');
-    const first = await ocrData(toCanvas(img, 4000), p => step('글자 인식 중', p));
+    const first = await ocrData(toCanvas(img, 4000), p => step('글자 인식 중', p), undefined, doc);
     const X = global.Extract;
     if (!X) return first.text;
     // 마일리지·포인트 적립내역의 회색 편명(OZ8199, LJ7484 등)은 원본 크기로는 거의 못 읽음 → 확대해서 한 번 더 인식
     if (/마일리지|적립|포인트/.test(first.text) && !X.findFlights(first.text).length) {
       for (const s of [1.6, 2]) {
         step('글자 인식 중(확대)');
-        const big = await ocr(toCanvas(img, 4000, s), p => step('글자 인식 중(확대)', p));
+        const big = await ocr(toCanvas(img, 4000, s), p => step('글자 인식 중(확대)', p), doc);
         if (X.findFlights(big).length) return big;
       }
     }
     // 탑승권 등: 큰 글씨로 띄엄띄엄 놓인 지명·편명은 기본 인식이 자주 깨뜨림 → 2배 확대 + 흩어진 글자 모드(PSM 11)로 재확인
     return enrichTransport(first.text, first.words, () => {
       step('글자 인식 중(구간 재확인)');
-      return ocrData(toCanvas(img, 4000, 2), p => step('글자 인식 중(구간 재확인)', p), '11');
+      return ocrData(toCanvas(img, 4000, 2), p => step('글자 인식 중(구간 재확인)', p), '11', doc);
     });
   }
 
@@ -164,7 +181,7 @@
       doc.pages.push(c.toDataURL('image/jpeg', 0.88));
       if (t.replace(/\s/g, '').length < 30) { // 스캔 PDF
         step(`PDF ${i}/${n}쪽 글자 인식`);
-        const d = await ocrData(c, p => step(`PDF ${i}/${n}쪽 글자 인식`, p));
+        const d = await ocrData(c, p => step(`PDF ${i}/${n}쪽 글자 인식`, p), undefined, doc);
         t = await enrichTransport(d.text, d.words, () => {
           step(`PDF ${i}/${n}쪽 구간 재확인`);
           const big = page.getViewport({ scale: 3 });
@@ -173,7 +190,7 @@
           const g2 = c2.getContext('2d');
           g2.fillStyle = '#fff'; g2.fillRect(0, 0, c2.width, c2.height);
           return page.render({ canvasContext: g2, viewport: big }).promise
-            .then(() => ocrData(c2, p => step(`PDF ${i}/${n}쪽 구간 재확인`, p), '11'));
+            .then(() => ocrData(c2, p => step(`PDF ${i}/${n}쪽 구간 재확인`, p), '11', doc));
         });
       } else t = await enrichTransport(t, words, null);
       texts.push(t);
@@ -219,5 +236,5 @@
     throw new Error('지원하지 않는 형식 (jpg, png, pdf, hwpx만 가능)');
   }
 
-  global.Ingest = { ingest, loadImage, hashOf: fnv };
+  global.Ingest = { ingest, loadImage, hashOf: fnv, setEngine, ENGINE_LABEL, get engine() { return engine; } };
 })(window);

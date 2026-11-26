@@ -11,6 +11,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         **http.server.SimpleHTTPRequestHandler.extensions_map,
         '.wasm': 'application/wasm',
         '.js': 'text/javascript',
+        '.mjs': 'text/javascript',
+        '.onnx': 'application/octet-stream',
         '.gz': 'application/octet-stream',
     }
 

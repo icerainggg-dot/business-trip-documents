@@ -50,6 +50,16 @@
     <!-- 2. 파일 등록 -->
     <section class="card">
       <h2><span class="step">2</span>서류 등록</h2>
+      <div class="ocr-engine">
+        <label>글자 인식 엔진
+          <select id="ocr-engine">
+            <option value="tesseract">Tesseract · 기본 (한국어+영어)</option>
+            <option value="paddle">PP-OCRv5 한국어 (korean_PP-OCRv5_mobile_rec)</option>
+          </select>
+        </label>
+        <button type="button" id="ocr-rerun" hidden title="이미 읽은 이미지·스캔 PDF를 지금 고른 엔진으로 다시 읽습니다 (직접 고친 서류는 제외)">고른 엔진으로 다시 인식</button>
+        <p id="ocr-status" class="hint"></p>
+      </div>
       <p id="file-warn" class="file-warn" hidden><b>index.html을 직접 열면 이미지·스캔 PDF를 읽을 수 없습니다.</b> 이 창을 닫고 같은 폴더의 <b>start.bat</b>을 실행해 열린 주소(http://localhost:8080/)에서 사용하세요.</p>
       <label id="drop" class="drop" tabindex="0">
         <input id="file" type="file" multiple accept=".jpg,.jpeg,.png,.gif,.bmp,.webp,.pdf,.hwpx,.hwp,image/*,application/pdf">
@@ -93,6 +103,7 @@
 <script src="js/extract.js"></script>
 <script src="js/analyze.js"></script>
 <script src="js/llm.js"></script>
+<script src="js/ocr-paddle.js"></script>
 <script src="js/ingest.js"></script>
 <script src="js/evidence.js"></script>
 <script src="js/app.js"></script>

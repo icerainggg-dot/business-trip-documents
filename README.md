@@ -3,7 +3,7 @@
 교통 영수증·탑승확인서·숙박 영수증·지도 캡처·공문을 한꺼번에 올리면 자동으로 분류하고, 빠진 서류와 불일치 항목을 알려준 뒤 **증빙서류(HWPX·PDF)** 를 만들어 주는 웹 페이지입니다.
 
 - 출발 / 경유 / 숙박 / 도착으로 여정을 정리하고, 영수증과 탑승확인서를 예약번호로 짝지어 점검합니다.
-- 캡처 이미지는 글자 인식(OCR)으로, PDF·HWPX는 본문을 읽어서 날짜·구간·편명·금액을 뽑습니다.
+- 캡처 이미지는 글자 인식(OCR)으로, PDF·HWPX는 본문을 읽어서 날짜·구간·편명·금액을 뽑습니다. 글자 인식 엔진은 **Tesseract(기본)** 와 **PP-OCRv5 한국어** 중에서 고를 수 있습니다.
 - 증빙서류는 제목 HY헤드라인M 15pt, 본문 휴먼명조 12pt, A4(위·아래 15mm, 좌·우 20mm, 머리말·꼬리말 10mm)로 만듭니다.
 
 > **올린 파일은 어디로도 전송되지 않습니다.** 모든 처리는 사용하는 PC의 브라우저 안에서만 이뤄집니다. (로컬 LLM을 연결하면 서류 이미지·글자가 지정한 LLM 서버로만 보내집니다)
@@ -27,6 +27,23 @@
 - **PDF 글꼴**: PDF는 사용하는 PC에 설치된 글꼴로 만들어집니다. 휴먼명조·HY헤드라인M이 없는 PC에서는 비슷한 글꼴(바탕·맑은 고딕)로 대체되며, 만들기 전에 알려 줍니다. HWPX는 한글에서 열면 지정 글꼴로 나옵니다.
 - **자동 인식 결과는 꼭 확인하세요.** 캡처 화질에 따라 날짜·금액 등이 틀릴 수 있습니다. 4번 "문서별 인식 결과"에서 직접 고치면 바로 다시 점검합니다.
 - 같은 파일(이름이 달라도 내용이 같으면)을 다시 올리면 자동으로 건너뜁니다.
+
+## 글자 인식 엔진 (Tesseract / PP-OCRv5 한국어)
+
+**2 서류 등록** 위의 **글자 인식 엔진** 에서 고릅니다(선택은 이 브라우저에 저장). 두 엔진 모두 이 PC의 브라우저 안에서만 동작합니다.
+
+| | Tesseract (기본) | PP-OCRv5 한국어 |
+|---|---|---|
+| 모델 | tessdata `kor`+`eng` | `PP-OCRv5_mobile_det` + `korean_PP-OCRv5_mobile_rec` |
+| 준비 | 바로 사용 | 처음 한 번 **`get-ocr-model.bat`** 실행 (약 13MB 내려받기) |
+| 특징 | 가볍고 빠름 | 한국어 전용 딥러닝 모델. 편명·공항코드·예약번호처럼 영문·숫자가 섞인 글자에 강함 |
+| 속도(참고) | 서류 1건 약 1초 | 서류 1건 약 1~1.5초 (처음 한 번 엔진 불러오기 몇 초) |
+
+- **PP-OCRv5를 고르는 법**: 폴더의 `get-ocr-model.bat` 을 더블클릭해 모델을 받은 뒤(Mac·Linux: `python3 tools/get_ocr_model.py`), 페이지를 새로 고치고 엔진을 **PP-OCRv5 한국어** 로 바꿉니다. 스크립트는 받은 파일의 SHA-256이 맞을 때만 저장합니다. 회사망에서 내려받기가 막히면 인터넷이 되는 PC에서 받아 `lib\paddleocr\korean_PP-OCRv5_mobile_rec.onnx` 로 넣으면 됩니다.
+- 이미 읽은 서류가 있을 때 엔진을 바꾸면 **고른 엔진으로 다시 인식** 버튼이 나타납니다(직접 고친 서류는 제외). 문서 카드에는 어느 엔진으로 읽었는지 표시됩니다.
+- PP-OCRv5를 쓸 수 없으면(모델 파일 없음 등) 그 서류는 Tesseract로 읽고 카드에 **PP-OCRv5 실패 → Tesseract로 읽음** 으로 알려 줍니다.
+- 검토 메모: PaddleOCR의 기본 `PP-OCRv5_mobile/server_rec` 와 새 `PP-OCRv6` 는 중국어·영어·일본어용이라 **한글을 읽지 못합니다.** 한국어는 별도 모델 `korean_PP-OCRv5_mobile_rec` 를 써야 하며, PaddleOCR 공식 문서 기준 한국어 평가셋(5,007장) 정확도 88.0%입니다(같은 문서의 이전 세대 `korean_PP-OCRv3_mobile_rec` 표기는 60.2%).
+- 사진처럼 크게 기울어진 서류는 글자 영역을 수평 상자로만 잡으므로 인식이 떨어질 수 있습니다. 캡처·스캔본은 문제없습니다.
 
 ## 로컬 LLM 연결 (선택)
 
@@ -57,6 +74,8 @@
 | [tessdata](https://github.com/tesseract-ocr/tessdata) (kor·eng 학습 데이터) | — | Apache-2.0 | `lib/tesseract/lang` |
 | [PDF.js](https://github.com/mozilla/pdf.js) | 3.11.174 | Apache-2.0 | `lib/pdfjs` |
 | [JSZip](https://github.com/Stuk/jszip) | 3.10.1 | MIT | `lib/jszip.min.js` |
+| [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) (PP-OCRv5 실행) | 1.24.3 | MIT | `lib/onnxruntime` |
+| [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) PP-OCRv5 모델·한국어 사전 ([RapidOCR](https://github.com/RapidAI/RapidOCR) ONNX 변환본) | PP-OCRv5 | Apache-2.0 | `lib/paddleocr` |
 | [python-hwpx](https://github.com/airmang/python-hwpx) 기본 서식 | — | Apache-2.0 | `lib/hwpx-template` |
 
 Apache License 2.0 전문은 `lib/hwpx-template/LICENSE` 에 있습니다.

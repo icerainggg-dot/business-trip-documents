@@ -128,6 +128,56 @@
     }
   }
 
+  // ───────────────────────── 글자 인식 엔진 ─────────────────────────
+  // Tesseract(기본) / PP-OCRv5 한국어 중 선택. 선택은 이 브라우저에만 저장
+  const OCR_KEY = 'btd.ocr';
+  const ocrSel = $('#ocr-engine');
+  let paddleOk = null; // 한국어 인식 모델 파일이 있는지 (null: 확인 전)
+  let paddleErr = '';  // 엔진 준비 중 오류
+  function ocrStatus() {
+    const el = $('#ocr-status');
+    const opt = ocrSel.querySelector('option[value="paddle"]');
+    opt.textContent = 'PP-OCRv5 한국어' + (paddleOk === false ? ' — 모델 내려받기 필요' : ' (korean_PP-OCRv5_mobile_rec)');
+    let msg = '추가 설치 없이 동작하는 기본 엔진입니다.', cls = '';
+    if (ocrSel.value === 'paddle') {
+      if (paddleOk === false) {
+        msg = '한국어 인식 모델 파일(lib/paddleocr/korean_PP-OCRv5_mobile_rec.onnx)이 없습니다. 폴더의 <code>get-ocr-model.bat</code>을 한 번 실행해 내려받은 뒤(약 13MB) 이 페이지를 새로 고치세요. 그전까지는 Tesseract로 읽습니다.'; cls = 'err';
+      } else if (paddleErr) { msg = `PP-OCRv5를 준비하지 못했습니다: ${esc(paddleErr)} — Tesseract로 읽습니다.`; cls = 'err'; }
+      else msg = '한국어 전용 PP-OCRv5 모델로 읽습니다. 이 PC 안에서만 처리되며, 처음 한 번은 엔진을 불러오느라 몇 초 걸립니다.' + (paddleOk ? '' : ' (모델 확인 중…)');
+    }
+    el.innerHTML = msg; el.className = 'hint' + (cls ? ' ' + cls : '');
+    // 이미 읽은 서류 중 다른 엔진으로 읽은 것 → 다시 인식 버튼
+    const n = rerunTargets().length;
+    const btn = $('#ocr-rerun');
+    btn.hidden = !n || (ocrSel.value === 'paddle' && (paddleOk === false || !!paddleErr));
+    btn.textContent = `고른 엔진으로 다시 인식 (${n}건)`;
+  }
+  const rerunTargets = () => state.docs.filter(d => d.status === 'done' && d.ocrEngine && d.ocrEngine !== ocrSel.value && !d.userTouched);
+  function setOcrEngine(v, save) {
+    ocrSel.value = Ingest.ENGINE_LABEL[v] ? v : 'tesseract';
+    Ingest.setEngine(ocrSel.value);
+    if (save) { try { localStorage.setItem(OCR_KEY, ocrSel.value); } catch (e) { /* 저장 불가: 이번 세션만 */ } }
+    ocrStatus();
+    if (ocrSel.value === 'paddle' && location.protocol !== 'file:') {
+      PaddleOcr.available().then(ok => {
+        paddleOk = ok; ocrStatus();
+        // 미리 엔진을 불러 두면 첫 서류가 빨라지고, 문제가 있으면 바로 알 수 있음
+        if (ok) PaddleOcr.init().then(() => { paddleErr = ''; ocrStatus(); }, e => { paddleErr = e.message || String(e); ocrStatus(); });
+      });
+    }
+  }
+  ocrSel.addEventListener('change', () => { paddleErr = ''; setOcrEngine(ocrSel.value, true); });
+  $('#ocr-rerun').addEventListener('click', () => {
+    const list = rerunTargets();
+    if (!list.length) return;
+    list.forEach(d => swapDoc(d, d.file, d.hash));
+    updateProgress();
+    scheduleAnalyze(0);
+    pump();
+    ocrStatus();
+  });
+  setOcrEngine((() => { try { return localStorage.getItem(OCR_KEY); } catch (e) { return null; } })() || 'tesseract', false);
+
   // ───────────────────────── 파일 등록 ─────────────────────────
   const drop = $('#drop'), fileInput = $('#file');
   // file:// 로 열면 OCR 워커를 불러올 수 없음 → start.bat(로컬 서버)로 열도록 안내
@@ -187,8 +237,16 @@
     const same = hash && state.docs.find(d => d !== old && d.hash === hash && d.status !== 'error');
     if (same) { alert(`${file.name}은(는) 이미 등록된 ${same.name}과(와) 같은 파일이라 교체하지 않았습니다.`); return; }
     if (!state.docs.includes(old)) return;
+    swapDoc(old, file, hash);
+    updateProgress();
+    scheduleAnalyze(0);
+    pump();
+  }
+  // 같은 자리에 새 문서를 넣고 읽기 대기열에 올림 (파일 교체·다른 엔진으로 다시 인식)
+  function swapDoc(old, file, hash) {
     const doc = newDoc(file, hash);
     state.docs[state.docs.indexOf(old)] = doc;
+    if (ai.plan) ai.stale = true;
     if (old.previewUrl) URL.revokeObjectURL(old.previewUrl);
     const oldCard = docsBox.querySelector(`[data-id="${old.id}"]`);
     renderDocCard(doc);
@@ -196,9 +254,7 @@
     if (oldCard) docsBox.replaceChild(card, oldCard);
     card.classList.add('flash');
     queue.push(doc);
-    updateProgress();
-    scheduleAnalyze(0);
-    pump();
+    return doc;
   }
 
   async function pump() {
@@ -231,6 +287,7 @@
     }
     busy = false;
     updateProgress();
+    ocrStatus();
     if (llmOn() && state.docs.some(d => d.status === 'done')) runPlan();
   }
   function yearHint() { return undefined; }
@@ -297,8 +354,13 @@
     if (doc.ai) return `<span class="tag ai" title="${esc(doc.ai.note || '')}">AI 판독${doc.ai.vision ? '(이미지)' : ''}</span>`;
     return '';
   }
+  function engineTag(doc) {
+    if (!doc.ocrEngine) return '';
+    if (doc.ocrFallback) return `<span class="tag warn" title="${esc(doc.ocrFallback)}">PP-OCRv5 실패 → Tesseract로 읽음</span>`;
+    return `<span class="tag eng" title="글자 인식 엔진">${esc(Ingest.ENGINE_LABEL[doc.ocrEngine])}</span>`;
+  }
   function statusHtml(doc) {
-    if (doc.status === 'done') return aiTag(doc) + (doc.ai && !doc.aiError ? '' : doc.lowConfidence ? '<span class="tag warn">분류 확인 필요</span>' : '<span class="tag ok">인식 완료</span>');
+    if (doc.status === 'done') return aiTag(doc) + (doc.ai && !doc.aiError ? '' : doc.lowConfidence ? '<span class="tag warn">분류 확인 필요</span>' : '<span class="tag ok">인식 완료</span>') + engineTag(doc);
     if (doc.status === 'error') return `<span class="tag err">오류: ${esc(doc.error)}</span>`;
     return `<span class="tag run">${esc(doc.step || '대기')}${doc.pct ? ' ' + Math.round(doc.pct * 100) + '%' : ''}</span>`;
   }
@@ -364,6 +426,7 @@
       $('#docs-sec').hidden = !state.docs.length;
       updateProgress();
       scheduleAnalyze(0);
+      ocrStatus();
     } else if (act.dataset.act === 'replace') {
       replaceTarget = doc;
       replaceInput.click();
@@ -550,5 +613,6 @@
     docsBox.innerHTML = '';
     $('#docs-sec').hidden = true; $('#result').hidden = true; $('#dup-note').hidden = true;
     updateProgress();
+    ocrStatus();
   });
 })();
